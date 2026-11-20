@@ -1,0 +1,10 @@
+{
+  "description": "Connects MSGI students and alumni through professional networking, mentorship, career opportunities, events, messaging, and privacy-conscious alumni discovery.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
