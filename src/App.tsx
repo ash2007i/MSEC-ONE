@@ -10,6 +10,26 @@ import {
   useState,
 } from "react";
 import feedNavLogo from "./assets/msgi-feed-nav.png";
+import { useAuth } from "./backend/AuthContext";
+import {
+  resetPassword as backendResetPassword,
+  signIn as backendSignIn,
+  signOut as backendSignOut,
+  signUp as backendSignUp,
+} from "./backend/auth";
+import {
+  getDepartments,
+  updateMyProfile,
+  type Department,
+} from "./backend/profile";
+import {
+  getAdminStats,
+  getPendingVerifications,
+  reviewVerification,
+  type AdminStats,
+  type PendingVerificationItem,
+} from "./backend/admin";
+import { supabase } from "./backend/supabase";
 import { createMessagingStore, type MessagingStore } from "./messaging/model";
 import { CommunityFeed } from "./feed/CommunityFeed";
 import {
@@ -64,7 +84,7 @@ const ConversationScreen = lazy(() =>
 );
 const SettingsFlow = lazy(() => import("./settings/SettingsFlow"));
 
-type Screen = "home" | "directory" | "map" | "feed" | "inbox" | "profile";
+type Screen = "home" | "directory" | "map" | "feed" | "inbox" | "profile" | "admin";
 type AuthView = "login" | "register";
 type Overlay =
   | "none"
@@ -76,28 +96,9 @@ type Overlay =
   | "preview"
   | "unavailable";
 
-/** Prototype sign-in always resolves to this fictional member until real auth exists. */
-const signedInAccount = createSampleAccount();
-const currentAlumniId: AlumniId = signedInAccount.id;
-const ownHeadline = "Building thoughtful tools for growing teams.";
-
-/* Prototype-only auth session: marks this browser as signed in; no credentials are stored. */
-const authStorageKey = "msgi-one.auth.v1";
-function readAuthSession(accountId: number) {
-  try {
-    return localStorage.getItem(authStorageKey) === String(accountId);
-  } catch {
-    return false;
-  }
-}
-function writeAuthSession(accountId: number | null) {
-  try {
-    if (accountId === null) localStorage.removeItem(authStorageKey);
-    else localStorage.setItem(authStorageKey, String(accountId));
-  } catch {
-    // Storage can be unavailable (private browsing); the in-memory state still applies.
-  }
-}
+const fallbackAccount = createSampleAccount();
+const currentAlumniId: AlumniId = fallbackAccount.id;
+const defaultHeadline = "Building thoughtful tools for growing teams.";
 
 /** Adds this device as the current session; a fresh sign-in is also recorded as login activity. */
 function withCurrentSession(settings: UserSettings, recordLogin: boolean): UserSettings {
@@ -208,15 +209,16 @@ const conversations = [
   { ...people[3], preview: "Could you review my portfolio?", time: "Mon", unread: 0, online: true },
 ];
 
-
 function BottomNav({
   screen,
   setScreen,
   t,
+  isAdmin,
 }: {
   screen: Screen;
   setScreen: (s: Screen) => void;
   t: Translator;
+  isAdmin: boolean;
 }) {
   const items: { key: Screen; icon: IconName; label: string }[] = [
     { key: "home", icon: "home", label: t("nav.home") },
@@ -224,6 +226,7 @@ function BottomNav({
     { key: "feed", icon: "feed", label: "Feed" },
     { key: "inbox", icon: "message", label: t("nav.inbox") },
     { key: "directory", icon: "users", label: t("nav.directory") },
+    ...(isAdmin ? [{ key: "admin" as const, icon: "shield" as const, label: "Admin" }] : []),
   ];
   return (
     <nav className="bottom-nav" aria-label="Primary navigation">
@@ -250,21 +253,100 @@ function BottomNav({
   );
 }
 
-function Auth({ onSignIn, notice }: { onSignIn: () => void; notice?: string | null }) {
+function Auth({
+  onSignedIn,
+  notice,
+}: {
+  onSignedIn: (preferAdmin: boolean) => void;
+  notice?: string | null;
+}) {
   const [view, setView] = useState<AuthView>("login");
-  const [role, setRole] = useState("Alumni");
+  const [roleTab, setRoleTab] = useState<"Alumni" | "Admin">("Alumni");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [departmentId, setDepartmentId] = useState("");
+  const [graduationYear, setGraduationYear] = useState("2025");
+  const [departments, setDepartments] = useState<Department[]>([]);
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
-  function submit(e: FormEvent) {
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [infoMsg, setInfoMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (view !== "register") return;
+    getDepartments()
+      .then((list) => {
+        setDepartments(list);
+        if (list.length && !departmentId) setDepartmentId(list[0].id);
+      })
+      .catch(() => {
+        // Fallback options render if departments require auth under RLS.
+      });
+  }, [view, departmentId]);
+
+  async function submit(e: FormEvent) {
     e.preventDefault();
+    setErrorMsg(null);
+    setInfoMsg(null);
     setLoading(true);
-    window.setTimeout(() => {
+    try {
+      if (view === "register") {
+        const fullName = `${firstName} ${lastName}`.trim();
+        const result = await backendSignUp({
+          email,
+          password,
+          fullName,
+          role: "alumni",
+          graduationYear: Number(graduationYear) || undefined,
+          departmentId: departmentId || undefined,
+        });
+        if (result.session) {
+          onSignedIn(false);
+        } else {
+          setSuccess(true);
+        }
+      } else {
+        await backendSignIn(email, password);
+        onSignedIn(roleTab === "Admin");
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Authentication failed. Please try again.");
+    } finally {
       setLoading(false);
-      if (view === "register") setSuccess(true);
-      else onSignIn();
-    }, 700);
+    }
   }
+
+  async function handleForgotPassword() {
+    setErrorMsg(null);
+    setInfoMsg(null);
+    if (!email.trim()) {
+      setErrorMsg("Enter your email address first to receive a password reset link.");
+      return;
+    }
+    setLoading(true);
+    try {
+      await backendResetPassword(email);
+      setInfoMsg("Password reset link sent. Check your inbox.");
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Could not send password reset email.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleGoogleAuth() {
+    setErrorMsg(null);
+    setInfoMsg(null);
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin },
+    });
+    if (error) setErrorMsg(error.message);
+  }
+
   if (success)
     return (
       <main className="auth-screen">
@@ -273,9 +355,10 @@ function Auth({ onSignIn, notice }: { onSignIn: () => void; notice?: string | nu
             <Icon name="check" size={30} />
           </div>
           <p className="eyebrow">APPLICATION RECEIVED</p>
-          <h1>Welcome to the community.</h1>
+          <h1>Check your email to verify.</h1>
           <p>
-            Your alumni details are being verified. We’ll notify you once your membership is active.
+            We sent a confirmation link to <b>{email.trim()}</b>. Confirm your email, then sign in
+            to access MSGI One.
           </p>
           <button
             className="primary-button"
@@ -289,6 +372,7 @@ function Auth({ onSignIn, notice }: { onSignIn: () => void; notice?: string | nu
         </div>
       </main>
     );
+
   return (
     <main className="auth-screen">
       <section className="auth-intro">
@@ -300,10 +384,16 @@ function Auth({ onSignIn, notice }: { onSignIn: () => void; notice?: string | nu
         </p>
       </section>
       <form className="auth-card" onSubmit={submit}>
-        {notice && (
+        {(notice || infoMsg) && (
           <div className="success-banner auth-notice" role="status">
             <Icon name="info" size={16} />
-            {notice}
+            {infoMsg ?? notice}
+          </div>
+        )}
+        {errorMsg && (
+          <div className="error-banner" role="alert">
+            <Icon name="alert" size={16} />
+            {errorMsg}
           </div>
         )}
         <div className="auth-card__head">
@@ -319,15 +409,15 @@ function Auth({ onSignIn, notice }: { onSignIn: () => void; notice?: string | nu
           <div className="segmented">
             <button
               type="button"
-              onClick={() => setRole("Alumni")}
-              className={role === "Alumni" ? "active" : ""}
+              onClick={() => setRoleTab("Alumni")}
+              className={roleTab === "Alumni" ? "active" : ""}
             >
               Alumni
             </button>
             <button
               type="button"
-              onClick={() => setRole("Admin")}
-              className={role === "Admin" ? "active" : ""}
+              onClick={() => setRoleTab("Admin")}
+              className={roleTab === "Admin" ? "active" : ""}
             >
               Admin
             </button>
@@ -337,11 +427,21 @@ function Auth({ onSignIn, notice }: { onSignIn: () => void; notice?: string | nu
           <div className="field-row">
             <label>
               <span>First name</span>
-              <input placeholder="Aarav" required />
+              <input
+                placeholder="Aarav"
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                required
+              />
             </label>
             <label>
               <span>Last name</span>
-              <input placeholder="Kumar" required />
+              <input
+                placeholder="Kumar"
+                value={lastName}
+                onChange={(e) => setLastName(e.target.value)}
+                required
+              />
             </label>
           </div>
         )}
@@ -351,6 +451,8 @@ function Auth({ onSignIn, notice }: { onSignIn: () => void; notice?: string | nu
             <Icon name="mail" size={18} />
             <input
               type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
               placeholder={view === "login" ? "Enter your email" : "name@msgi.edu.in"}
               required
             />
@@ -360,18 +462,31 @@ function Auth({ onSignIn, notice }: { onSignIn: () => void; notice?: string | nu
           <div className="field-row">
             <label>
               <span>Department</span>
-              <select>
-                <option>Computer Science</option>
-                <option>Information Technology</option>
-                <option>Mechanical Engineering</option>
+              <select value={departmentId} onChange={(e) => setDepartmentId(e.target.value)}>
+                {departments.length > 0 ? (
+                  departments.map((dept) => (
+                    <option key={dept.id} value={dept.id}>
+                      {dept.name}
+                    </option>
+                  ))
+                ) : (
+                  <>
+                    <option value="">Computer Science</option>
+                    <option value="">Information Technology</option>
+                    <option value="">Mechanical Engineering</option>
+                    <option value="">Electronics & Communication</option>
+                  </>
+                )}
               </select>
             </label>
             <label>
               <span>Class of</span>
-              <select>
-                <option>2024</option>
-                <option>2023</option>
-                <option>2022</option>
+              <select value={graduationYear} onChange={(e) => setGraduationYear(e.target.value)}>
+                {Array.from({ length: 15 }, (_, idx) => String(2028 - idx)).map((yr) => (
+                  <option key={yr} value={yr}>
+                    {yr}
+                  </option>
+                ))}
               </select>
             </label>
           </div>
@@ -382,6 +497,8 @@ function Auth({ onSignIn, notice }: { onSignIn: () => void; notice?: string | nu
             <Icon name="lock" size={18} />
             <input
               type={showPassword ? "text" : "password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
               placeholder="Enter your password"
               minLength={6}
               required
@@ -397,7 +514,12 @@ function Auth({ onSignIn, notice }: { onSignIn: () => void; notice?: string | nu
           </div>
         </label>
         {view === "login" && (
-          <button type="button" className="text-link forgot">
+          <button
+            type="button"
+            className="text-link forgot"
+            onClick={handleForgotPassword}
+            disabled={loading}
+          >
             Forgot password?
           </button>
         )}
@@ -416,20 +538,24 @@ function Auth({ onSignIn, notice }: { onSignIn: () => void; notice?: string | nu
           <button
             type="button"
             className="text-link"
-            onClick={() => setView(view === "login" ? "register" : "login")}
+            onClick={() => {
+              setErrorMsg(null);
+              setInfoMsg(null);
+              setView(view === "login" ? "register" : "login");
+            }}
           >
             {view === "login" ? "Create alumni account" : "Sign in"}
           </button>
         </div>
         {view === "login" && (
-          <button type="button" className="google-auth-button" onClick={onSignIn}>
+          <button type="button" className="google-auth-button" onClick={handleGoogleAuth}>
             <span aria-hidden>G</span>
             Continue with Google
           </button>
         )}
       </form>
       <p className="auth-support">
-        Need help? <button>Contact alumni support</button>
+        Need help? <button type="button">Contact alumni support</button>
       </p>
     </main>
   );
@@ -494,14 +620,27 @@ function HomeScreen({
   onProfile: () => void;
 }) {
   const [rsvped, setRsvped] = useState(false);
+  const firstName = profile.name.trim().split(" ")[0] || "Member";
+  const todayLabel = useMemo(
+    () =>
+      new Intl.DateTimeFormat("en-IN", {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+      })
+        .format(new Date())
+        .toUpperCase(),
+    [],
+  );
+
   return (
     <div className="screen">
       <div className="home-hero curved-header">
         <MainHeader person={profile} onProfile={onProfile} />
         <div className="welcome">
-          <p>THURSDAY, 14 MARCH</p>
+          <p>{todayLabel}</p>
           <h1>
-            Good morning, <em>Aarav.</em>
+            Welcome back, <em>{firstName}.</em>
           </h1>
           <span>Here’s what’s happening across your network.</span>
         </div>
@@ -613,6 +752,139 @@ function HomeScreen({
           </div>
           <Icon name="chevron" />
         </button>
+      </div>
+    </div>
+  );
+}
+
+function AdminScreen({
+  profile,
+  onProfile,
+}: {
+  profile: AvatarPerson;
+  onProfile: () => void;
+}) {
+  const [stats, setStats] = useState<AdminStats | null>(null);
+  const [pending, setPending] = useState<PendingVerificationItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const loadAdminData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [statsData, pendingData] = await Promise.all([
+        getAdminStats(),
+        getPendingVerifications(),
+      ]);
+      setStats(statsData);
+      setPending(pendingData);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load admin console.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAdminData();
+  }, [loadAdminData]);
+
+  async function handleReview(id: string, decision: "approved" | "rejected") {
+    setBusyId(id);
+    setError(null);
+    try {
+      await reviewVerification(id, decision);
+      await loadAdminData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update verification.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <div className="screen">
+      <MainSectionHeader profile={profile} onProfile={onProfile} title="Admin console" />
+      <div className="content">
+        {error && (
+          <div className="error-banner" role="alert">
+            <Icon name="alert" size={16} />
+            {error}
+          </div>
+        )}
+        <GlassPanel className="profile-section">
+          <p className="eyebrow">NETWORK OVERVIEW</p>
+          <h2>Live platform metrics</h2>
+          {loading && !stats ? (
+            <p>Loading metrics…</p>
+          ) : (
+            <div className="detail-grid">
+              <span>
+                <small>Total members</small>
+                <b>{stats?.totalUsers ?? 0}</b>
+              </span>
+              <span>
+                <small>Verified alumni</small>
+                <b>{stats?.verifiedAlumni ?? 0}</b>
+              </span>
+              <span>
+                <small>Pending reviews</small>
+                <b>{stats?.pendingVerifications ?? 0}</b>
+              </span>
+              <span>
+                <small>Live posts</small>
+                <b>{stats?.publishedPosts ?? 0}</b>
+              </span>
+            </div>
+          )}
+        </GlassPanel>
+
+        <GlassPanel className="profile-section">
+          <p className="eyebrow">VERIFICATION QUEUE</p>
+          <h2>Pending alumni requests ({pending.length})</h2>
+          {!loading && pending.length === 0 ? (
+            <p>All verification requests have been reviewed.</p>
+          ) : (
+            <div className="directory-list">
+              {pending.map((item) => (
+                <article className="alumni-card" key={item.id}>
+                  <div className="alumni-main">
+                    <Avatar
+                      person={{
+                        name: item.applicant?.full_name || "Alumni applicant",
+                        image: item.applicant?.avatar_url ?? undefined,
+                      }}
+                      size="md"
+                    />
+                    <div>
+                      <h3>{item.applicant?.full_name || "Unnamed member"}</h3>
+                      <p>{item.institution_email || "No institutional email provided"}</p>
+                      <small>Class of {item.graduation_year ?? "—"}</small>
+                    </div>
+                  </div>
+                  <div className="alumni-actions">
+                    <button
+                      type="button"
+                      disabled={busyId === item.id}
+                      onClick={() => handleReview(item.id, "rejected")}
+                    >
+                      <Icon name="close" size={15} /> Reject
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busyId === item.id}
+                      onClick={() => handleReview(item.id, "approved")}
+                    >
+                      <Icon name="check" size={15} /> Approve
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </GlassPanel>
       </div>
     </div>
   );
@@ -791,7 +1063,7 @@ function DirectoryScreen({
               <input type="checkbox" defaultChecked />
             </label>
             <button className="primary-button" onClick={() => setFilterOpen(false)}>
-              Show 4 alumni
+              Show {filtered.length} alumni
             </button>
           </section>
         </div>
@@ -960,16 +1232,26 @@ function ChatScreen({
 
 function ProfileScreen({
   account,
+  headline,
+  bio,
+  linkedinUrl,
   locationVisible,
   setLocationVisible,
   openSettings,
   edit,
+  isAdmin,
+  openAdmin,
 }: {
   account: UserSettings["account"];
+  headline: string;
+  bio: string;
+  linkedinUrl?: string | null;
   locationVisible: boolean;
   setLocationVisible: (visible: boolean) => void;
   openSettings: (route: SettingsRoute) => void;
   edit: () => void;
+  isAdmin: boolean;
+  openAdmin: () => void;
 }) {
   const person = { name: account.fullName, role: account.role, image: account.avatar };
   return (
@@ -988,10 +1270,12 @@ function ProfileScreen({
             {account.verified && <VerifyBadge />}
             <h1>{account.fullName}</h1>
             <p>
-              {account.role} at {account.company}
+              {account.role}
+              {account.company ? ` at ${account.company}` : ""}
             </p>
             <span>
-              {account.department} · Class of {account.graduationYear}
+              {account.department}
+              {account.graduationYear ? ` · Class of ${account.graduationYear}` : ""}
             </span>
           </div>
         </div>
@@ -1002,7 +1286,12 @@ function ProfileScreen({
             <FrostedIcon name="edit" />
             Edit profile
           </button>
-          <button>
+          <button
+            onClick={() => {
+              if (linkedinUrl) window.open(linkedinUrl, "_blank", "noopener,noreferrer");
+              else edit();
+            }}
+          >
             <FrostedIcon name="linkedin" />
             LinkedIn
           </button>
@@ -1013,38 +1302,25 @@ function ProfileScreen({
         </div>
         <GlassPanel className="profile-section">
           <p className="eyebrow">PROFESSIONAL IDENTITY</p>
-          <h2>{ownHeadline}</h2>
+          <h2>{headline}</h2>
+          {bio && <p>{bio}</p>}
           <div className="detail-grid">
             <span>
               <small>Current role</small>
-              <b>{account.role}</b>
+              <b>{account.role || "—"}</b>
             </span>
             <span>
               <small>Company</small>
-              <b>{account.company}</b>
+              <b>{account.company || "—"}</b>
             </span>
             <span>
               <small>Location</small>
-              <b>{account.city}, India</b>
+              <b>{account.city ? `${account.city}, India` : "Not set"}</b>
             </span>
             <span>
-              <small>Experience</small>
-              <b>5 years</b>
+              <small>Status</small>
+              <b>{account.verified ? "Verified alumni" : "Pending verification"}</b>
             </span>
-          </div>
-        </GlassPanel>
-        <GlassPanel className="profile-section">
-          <div className="section-head">
-            <div>
-              <p className="eyebrow">EXPERTISE</p>
-              <h2>Skills & interests</h2>
-            </div>
-          </div>
-          <div className="skill-list">
-            <span>Product strategy</span>
-            <span>Design systems</span>
-            <span>Mentorship</span>
-            <span>B2B SaaS</span>
           </div>
         </GlassPanel>
         <section className="privacy-card">
@@ -1074,6 +1350,15 @@ function ProfileScreen({
           </div>
         </section>
         <GlassPanel className="settings-actions">
+          {isAdmin && (
+            <button className="menu-row" onClick={openAdmin}>
+              <span>
+                <FrostedIcon name="shield" />
+                Admin console
+              </span>
+              <Icon name="chevron" />
+            </button>
+          )}
           <button className="menu-row" onClick={() => openSettings("privacy")}>
             <span>
               <FrostedIcon name="shield" />
@@ -1335,47 +1620,82 @@ function EventsScreen({ onBack }: { onBack: () => void }) {
 function EditProfile({
   alumniId,
   account,
+  initialHeadline,
+  initialBio,
   socialLinks,
   onSaveSocialLinks,
+  onSavedProfile,
   onBack,
 }: {
   alumniId: AlumniId;
   account: UserSettings["account"];
+  initialHeadline: string;
+  initialBio: string;
   socialLinks?: SocialLinks;
   onSaveSocialLinks: (record: AlumniSocialLinksRecord) => void;
+  onSavedProfile: () => Promise<void>;
   onBack: () => void;
 }) {
+  const [headline, setHeadline] = useState(initialHeadline);
+  const [jobTitle, setJobTitle] = useState(account.role);
+  const [company, setCompany] = useState(account.company);
+  const [city, setCity] = useState(account.city);
+  const [bio, setBio] = useState(initialBio);
+  const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [socialDraft, setSocialDraft] = useState<SocialLinksDraft>(() =>
     toSocialLinksDraft(socialLinks),
   );
   const [socialErrors, setSocialErrors] = useState<SocialLinkErrors>({});
   const hasSocialErrors = Object.keys(socialErrors).length > 0;
+
   const updateSocialLink = (platform: SocialPlatform, value: string) => {
     setSaved(false);
     setSocialDraft((draft) => ({ ...draft, [platform]: value }));
     setSocialErrors(({ [platform]: _removed, ...errors }) => errors);
   };
-  const save = () => {
+
+  const save = async () => {
     const { links, errors } = validateSocialLinks(socialDraft);
     setSocialErrors(errors);
     if (Object.keys(errors).length) {
       setSaved(false);
       return false;
     }
-    onSaveSocialLinks({ alumniId, links, updatedAt: new Date().toISOString() });
-    setSocialDraft(toSocialLinksDraft(links));
-    setSaved(true);
-    return true;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await updateMyProfile({
+        headline: headline.trim() || null,
+        job_title: jobTitle.trim() || null,
+        company: company.trim() || null,
+        city: city.trim() || null,
+        bio: bio.trim() || null,
+        linkedin_url: links.linkedin ?? null,
+        website_url: links.website ?? null,
+      });
+      onSaveSocialLinks({ alumniId, links, updatedAt: new Date().toISOString() });
+      setSocialDraft(toSocialLinksDraft(links));
+      await onSavedProfile();
+      setSaved(true);
+      return true;
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Failed to save profile.");
+      return false;
+    } finally {
+      setSaving(false);
+    }
   };
+
   return (
     <div className="screen">
       <TopBar
         title="Edit profile"
         onBack={onBack}
         action={
-          <button className="save-link" onClick={save}>
-            Save
+          <button className="save-link" onClick={() => void save()} disabled={saving}>
+            {saving ? "Saving…" : "Save"}
           </button>
         }
       />
@@ -1386,10 +1706,10 @@ function EditProfile({
             Profile updated successfully
           </div>
         )}
-        {hasSocialErrors && (
+        {(hasSocialErrors || saveError) && (
           <div className="error-banner" role="alert">
             <Icon name="close" />
-            Check the highlighted social links before saving.
+            {saveError ?? "Check the highlighted social links before saving."}
           </div>
         )}
         <div className="edit-photo glass-panel">
@@ -1397,7 +1717,7 @@ function EditProfile({
             person={{ name: account.fullName, role: account.role, image: account.avatar }}
             size="xl"
           />
-          <button>
+          <button type="button">
             <Icon name="edit" size={16} />
           </button>
           <div>
@@ -1409,19 +1729,23 @@ function EditProfile({
           <p className="form-section-label">PROFESSIONAL DETAILS</p>
           <label className="field">
             <span>Headline</span>
-            <input defaultValue="Senior Product Designer at Freshworks" />
+            <input value={headline} onChange={(e) => setHeadline(e.target.value)} />
+          </label>
+          <label className="field">
+            <span>Job title</span>
+            <input value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} />
           </label>
           <label className="field">
             <span>Company</span>
-            <input defaultValue="Freshworks" />
+            <input value={company} onChange={(e) => setCompany(e.target.value)} />
           </label>
           <label className="field">
-            <span>Location</span>
-            <input defaultValue="Chennai, India" />
+            <span>City</span>
+            <input value={city} onChange={(e) => setCity(e.target.value)} />
           </label>
           <label className="field">
             <span>About</span>
-            <textarea defaultValue="Building thoughtful tools for growing teams." />
+            <textarea value={bio} onChange={(e) => setBio(e.target.value)} />
           </label>
         </GlassPanel>
         <GlassPanel className="edit-form social-form">
@@ -1461,11 +1785,12 @@ function EditProfile({
           })}
           <button
             className="primary-button"
-            onClick={() => {
-              if (save()) window.setTimeout(onBack, 700);
+            disabled={saving}
+            onClick={async () => {
+              if (await save()) window.setTimeout(onBack, 700);
             }}
           >
-            Save changes
+            {saving ? "Saving…" : "Save changes"}
           </button>
         </GlassPanel>
       </div>
@@ -1481,20 +1806,27 @@ const reportablePeople: ReportablePerson[] = people.map(({ id, name, dept, year 
 }));
 
 export default function App() {
+  const {
+    user,
+    profile,
+    details,
+    academicRecords,
+    isAuthenticated,
+    isAdmin,
+    loading: authLoading,
+    refreshProfile,
+  } = useAuth();
+
   const [messaging] = useState(() => createMessagingStore(conversations));
   useEffect(() => () => messaging.dispose(), [messaging]);
-  const account = signedInAccount;
-  const [signedIn, setSignedIn] = useState(() => readAuthSession(account.id));
-  // Loaded before sign-in so this device's appearance applies to the sign-in screen too.
-  const [settings, setSettings] = useState<UserSettings>(() => {
-    const stored = loadSettings(account);
-    return readAuthSession(account.id) ? withCurrentSession(stored, false) : stored;
-  });
+
+  const [settings, setSettings] = useState<UserSettings>(() => loadSettings(fallbackAccount));
   const [screen, setScreen] = useState<Screen>("home");
   const [overlay, setOverlay] = useState<Overlay>("none");
   const [settingsStack, setSettingsStack] = useState<SettingsRoute[]>([]);
   const [selectedPerson, setSelectedPerson] = useState(1);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [preferAdminTab, setPreferAdminTab] = useState(false);
   const [pendingProfileId, setPendingProfileId] = useState<number | null>(() =>
     typeof window === "undefined" ? null : parseSharedProfileId(window.location.search),
   );
@@ -1502,9 +1834,73 @@ export default function App() {
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(() =>
     prefersDark() ? "dark" : "light",
   );
-  // Keyed by alumni account so a public profile can only read its owner's links.
   const [socialLinksByAlumni, setSocialLinksByAlumni] = useState<Record<AlumniId, SocialLinks>>({});
 
+  // Sync Supabase profile + private details + academic records into UI settings.account
+  useEffect(() => {
+    if (!isAuthenticated || !user) return;
+    const primaryAcademic = academicRecords.find((r) => r.is_current) ?? academicRecords[0];
+    const resolvedName =
+      profile?.full_name?.trim() ||
+      (user.user_metadata?.full_name as string | undefined) ||
+      user.email?.split("@")[0] ||
+      "MSGI Member";
+    const resolvedRole =
+      profile?.job_title ||
+      (profile?.role === "admin"
+        ? "Administrator"
+        : profile?.role === "student"
+          ? "Student"
+          : "Alumni");
+
+    setSettings((current) =>
+      withCurrentSession(
+        {
+          ...current,
+          account: {
+            ...current.account,
+            fullName: resolvedName,
+            email: user.email ?? details?.personal_email ?? current.account.email,
+            phone: details?.phone ?? "",
+            role: resolvedRole,
+            company: profile?.company ?? "",
+            city: profile?.city ?? "",
+            department: primaryAcademic?.department?.name ?? current.account.department,
+            graduationYear: primaryAcademic?.graduation_year
+              ? String(primaryAcademic.graduation_year)
+              : current.account.graduationYear,
+            verified: Boolean(profile?.is_verified),
+            avatar: profile?.avatar_url ?? "",
+          },
+        },
+        false,
+      ),
+    );
+
+    if (profile?.linkedin_url || profile?.website_url) {
+      setSocialLinksByAlumni((current) => ({
+        ...current,
+        [currentAlumniId]: {
+          ...current[currentAlumniId],
+          ...(profile.linkedin_url ? { linkedin: profile.linkedin_url } : {}),
+          ...(profile.website_url ? { website: profile.website_url } : {}),
+        },
+      }));
+    }
+  }, [isAuthenticated, user, profile, details, academicRecords]);
+
+  // Gate Admin screen strictly by profile?.role === 'admin'
+  useEffect(() => {
+    if (preferAdminTab && isAuthenticated && !authLoading) {
+      if (isAdmin) setScreen("admin");
+      setPreferAdminTab(false);
+    }
+    if (screen === "admin" && !isAdmin) {
+      setScreen("home");
+    }
+  }, [preferAdminTab, isAuthenticated, authLoading, isAdmin, screen]);
+
+  const ownHeadline = profile?.headline || profile?.bio || defaultHeadline;
   const t = useMemo(() => createTranslator(settings.language), [settings.language]);
   const locale = localeFor(settings.language);
   const { appearance, language, privacy } = settings;
@@ -1512,7 +1908,7 @@ export default function App() {
   const mainProfile: AvatarPerson = {
     name: settings.account.fullName,
     role: settings.account.role,
-    image: settings.account.avatar,
+    image: settings.account.avatar || undefined,
   };
 
   useEffect(() => {
@@ -1531,10 +1927,9 @@ export default function App() {
     root.lang = language;
   }, [resolvedTheme, appearance.textSize, appearance.reduceMotion, language]);
 
-  // Persist only for the signed-in member; signing out or deleting must not rewrite storage.
   useEffect(() => {
-    if (signedIn) saveSettings(settings);
-  }, [settings, signedIn]);
+    if (isAuthenticated) saveSettings(settings);
+  }, [settings, isAuthenticated]);
 
   const update = useCallback(
     <K extends SettingsSection>(
@@ -1566,7 +1961,6 @@ export default function App() {
     setOverlay("settings");
   };
   const settingsBack = () => {
-    // Leaving the first Settings screen returns to wherever Settings was opened from.
     if (settingsStack.length <= 1) {
       setSettingsStack([]);
       setOverlay("none");
@@ -1578,17 +1972,21 @@ export default function App() {
     setOverlay("settings");
   };
 
-  const signIn = () => {
-    writeAuthSession(account.id);
+  const handleSignedIn = (preferAdmin: boolean) => {
     setSettings((current) => withCurrentSession(current, true));
     setAuthNotice(null);
     setPublicViewDismissed(false);
+    setPreferAdminTab(preferAdmin);
     setScreen("home");
     setOverlay("none");
-    setSignedIn(true);
   };
-  const logout = (notice?: string) => {
-    writeAuthSession(null);
+
+  const logout = async (notice?: string) => {
+    try {
+      await backendSignOut();
+    } catch (err) {
+      console.error("Supabase sign-out error:", err);
+    }
     setSettings((current) => ({
       ...current,
       security: {
@@ -1596,17 +1994,17 @@ export default function App() {
         sessions: current.security.sessions.filter((session) => !session.current),
       },
     }));
-    setSignedIn(false);
     setScreen("home");
     setOverlay("none");
     setSettingsStack([]);
     setAuthNotice(notice ?? null);
   };
+
   const deleteAccount = () => {
-    clearStoredSettings(account.id);
-    setSocialLinksByAlumni(({ [account.id]: _removed, ...rest }) => rest);
-    setSettings(createDefaultSettings(account));
-    logout(t("delete.notice"));
+    clearStoredSettings(fallbackAccount.id);
+    setSocialLinksByAlumni(({ [fallbackAccount.id]: _removed, ...rest }) => rest);
+    setSettings(createDefaultSettings(fallbackAccount));
+    void logout(t("delete.notice"));
   };
 
   const profileUrl = useMemo(
@@ -1623,15 +2021,14 @@ export default function App() {
   const sharedTarget =
     pendingProfileId === null
       ? null
-      : pendingProfileId === account.id
+      : pendingProfileId === fallbackAccount.id
         ? "self"
         : people.some((person) => person.id === pendingProfileId)
           ? "person"
           : "missing";
 
-  // Shared links open once the visitor is signed in, then the URL is cleaned up.
   useEffect(() => {
-    if (!signedIn || pendingProfileId === null) return;
+    if (!isAuthenticated || pendingProfileId === null) return;
     if (sharedTarget === "self") setOverlay("preview");
     else if (sharedTarget === "person") {
       setSelectedPerson(pendingProfileId);
@@ -1640,9 +2037,21 @@ export default function App() {
     setSettingsStack([]);
     setPendingProfileId(null);
     removeSharedProfileParam();
-  }, [signedIn, pendingProfileId, sharedTarget]);
+  }, [isAuthenticated, pendingProfileId, sharedTarget]);
 
-  if (!signedIn) {
+  if (authLoading && !isAuthenticated) {
+    return (
+      <div className="app-stage">
+        <div className="phone-shell">
+          <div className="screen flex items-center justify-center" role="status">
+            Restoring session…
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
     const showPublicProfile =
       sharedTarget === "self" && privacy.profileVisibility === "public" && !publicViewDismissed;
     const linkNotice =
@@ -1670,7 +2079,7 @@ export default function App() {
               onSignIn={() => setPublicViewDismissed(true)}
             />
           ) : (
-            <Auth onSignIn={signIn} notice={linkNotice ?? authNotice} />
+            <Auth onSignedIn={handleSignedIn} notice={linkNotice ?? authNotice} />
           )}
         </div>
         <div className="desktop-note">
@@ -1685,6 +2094,7 @@ export default function App() {
       </div>
     );
   }
+
   let content: ReactNode;
   if (overlay === "settings" && settingsStack.length)
     content = (
@@ -1752,8 +2162,11 @@ export default function App() {
       <EditProfile
         alumniId={currentAlumniId}
         account={settings.account}
+        initialHeadline={profile?.headline ?? ""}
+        initialBio={profile?.bio ?? ""}
         socialLinks={socialLinksByAlumni[currentAlumniId]}
         onSaveSocialLinks={saveSocialLinks}
+        onSavedProfile={refreshProfile}
         onBack={() => setOverlay("none")}
       />
     );
@@ -1794,23 +2207,33 @@ export default function App() {
         onProfile={() => setScreen("profile")}
       />
     );
+  else if (screen === "admin" && isAdmin)
+    content = <AdminScreen profile={mainProfile} onProfile={() => setScreen("profile")} />;
   else
     content = (
       <ProfileScreen
         account={settings.account}
+        headline={ownHeadline}
+        bio={profile?.bio ?? ""}
+        linkedinUrl={profile?.linkedin_url}
         locationVisible={privacy.locationVisible}
         setLocationVisible={(locationVisible) =>
           update("privacy", (current) => ({ ...current, locationVisible }))
         }
         openSettings={openSettings}
         edit={() => setOverlay("edit")}
+        isAdmin={isAdmin}
+        openAdmin={() => setScreen("admin")}
       />
     );
+
   return (
     <div className="app-stage app-stage--signed">
       <div className="phone-shell">
         {content}
-        {overlay === "none" && <BottomNav screen={screen} setScreen={setScreen} t={t} />}
+        {overlay === "none" && (
+          <BottomNav screen={screen} setScreen={setScreen} t={t} isAdmin={isAdmin} />
+        )}
       </div>
       <div className="desktop-note">
         <Logo />
