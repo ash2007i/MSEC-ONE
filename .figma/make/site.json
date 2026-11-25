@@ -1,5 +1,6 @@
 {
-  "description": "Connects MSGI students and alumni through professional networking, mentorship, career opportunities, events, messaging, and privacy-conscious alumni discovery.",
+  "title": "MSEC_ONE",
+  "description": "A web application designed to help users access and manage the content provided.",
   "robots": {
     "index": false
   },

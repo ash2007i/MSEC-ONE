@@ -8,6 +8,7 @@ import {
 } from "react";
 import { ChatIcon, type ChatIconName } from "./ChatIcon";
 import { EmojiPicker } from "./EmojiPicker";
+import { useAnimatedDismiss } from "../ui/motion";
 import {
   currentUser,
   messagePreview,
@@ -66,8 +67,9 @@ function Dialog({
   className?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
+  const dismiss = useAnimatedDismiss(ref, onClose);
+  const closeRef = useRef(dismiss);
+  closeRef.current = dismiss;
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     const selector = 'button:not(:disabled), input, select, textarea, a[href], [tabindex="0"]';
@@ -104,7 +106,7 @@ function Dialog({
     };
   }, []);
   return (
-    <div className="msg-overlay" onClick={onClose}>
+    <div className="msg-overlay" onClick={dismiss}>
       <div
         ref={ref}
         className={`msg-dialog msg-frost ${className}`}
@@ -118,7 +120,7 @@ function Dialog({
             <span className="msg-overline">MSGI ONE · MESSAGING</span>
             <h2>{title}</h2>
           </div>
-          <IconButton icon="close" label={`Close ${title}`} onClick={onClose} />
+          <IconButton icon="close" label={`Close ${title}`} onClick={dismiss} />
         </div>
         {children}
       </div>

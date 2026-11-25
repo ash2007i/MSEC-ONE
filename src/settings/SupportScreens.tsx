@@ -1,17 +1,13 @@
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { Icon, Logo } from "../ui/chrome";
+import { SupportPage } from "../network/SupportPage";
 import { acknowledgements, guidelineSections, helpArticles, policySections, type HelpCategory } from "./content";
 import {
   APP_BUILD,
   APP_VERSION,
   createReference,
   describeDevice,
-  formatBytes,
   simulateRequest,
-  supportCategories,
-  validateAttachment,
-  validateSupportRequest,
-  type ValidationError,
 } from "./model";
 import {
   Button,
@@ -25,7 +21,6 @@ import {
   SettingsPage,
   SuccessPanel,
   TextAreaField,
-  TextField,
   ToggleRow,
   errorMessage,
   useSettings,
@@ -179,152 +174,14 @@ export function HelpScreen() {
 }
 
 export function ContactScreen() {
-  const { t, settings, back, locale } = useSettings();
-  const [form, setForm] = useState({ subject: "", category: "", description: "" });
-  const [file, setFile] = useState<File | null>(null);
-  const [fileError, setFileError] = useState<ValidationError | null>(null);
-  const [submitted, setSubmitted] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [reference, setReference] = useState("");
-  const fileInput = useRef<HTMLInputElement>(null);
-  const errors = validateSupportRequest({ ...form, attachment: file });
-  const show = (key: keyof typeof errors) =>
-    submitted && errors[key] ? t(`error.${errors[key]!}`) : undefined;
-  async function submit() {
-    setSubmitted(true);
-    setError("");
-    if (Object.keys(errors).length) {
-      setError(t("common.fixErrors"));
-      return;
-    }
-    setBusy(true);
-    try {
-      setReference(await simulateRequest(createReference("MSGI"), { delay: 900 }));
-    } catch (caught) {
-      setError(errorMessage(caught, t));
-    } finally {
-      setBusy(false);
-    }
-  }
-  if (reference)
-    return (
-      <SettingsPage title={t("contact.title")}>
-        <SuccessPanel
-          title={t("contact.success")}
-          body={t("contact.success.body", { ref: reference, email: settings.account.email })}
-          note={t("support.prototypeNote")}
-          action={<Button onClick={back}>{t("support.backToHelp")}</Button>}
-        />
-      </SettingsPage>
-    );
+  const { settings, back, supportService, returnToApp } = useSettings();
   return (
-    <SettingsPage title={t("contact.title")} description={t("contact.description")}>
-      <form
-        className="glass-panel set-form"
-        noValidate
-        onSubmit={(event) => {
-          event.preventDefault();
-          submit();
-        }}
-      >
-        <TextField
-          id="support-subject"
-          label={t("contact.subject")}
-          value={form.subject}
-          maxLength={120}
-          placeholder={t("contact.subject.placeholder")}
-          onChange={(event) => setForm({ ...form, subject: event.target.value })}
-          error={show("subject")}
-        />
-        <SelectField
-          id="support-category"
-          label={t("contact.category")}
-          value={form.category}
-          onChange={(event) => setForm({ ...form, category: event.target.value })}
-          error={show("category") && t("error.chooseOption")}
-        >
-          <option value="" disabled>
-            {t("contact.category.placeholder")}
-          </option>
-          {supportCategories.map((category) => (
-            <option key={category} value={category}>
-              {t(`contact.category.${category}`)}
-            </option>
-          ))}
-        </SelectField>
-        <TextAreaField
-          id="support-description"
-          label={t("contact.details")}
-          value={form.description}
-          max={1000}
-          placeholder={t("contact.details.placeholder")}
-          onChange={(event) => setForm({ ...form, description: event.target.value })}
-          error={show("description")}
-        />
-        <div className="field set-field">
-          <label htmlFor="support-attachment">
-            {t("contact.attachment")}
-            <em>{t("common.optional")}</em>
-          </label>
-          {file ? (
-            <div className="set-attachment">
-              <Icon name="paperclip" size={17} />
-              <span>
-                <b className="set-ellipsis">{file.name}</b>
-                <small>{formatBytes(file.size, locale)}</small>
-              </span>
-              <button
-                type="button"
-                className="set-icon-action"
-                aria-label={t("contact.removeAttachment")}
-                onClick={() => {
-                  setFile(null);
-                  setFileError(null);
-                  if (fileInput.current) fileInput.current.value = "";
-                }}
-              >
-                <Icon name="close" size={16} />
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              className={`set-upload ${fileError ? "input-wrap--error" : ""}`}
-              onClick={() => fileInput.current?.click()}
-            >
-              <Icon name="upload" size={18} />
-              <span>
-                <b>{t("contact.attach")}</b>
-                <small>{t("contact.attachment.hint")}</small>
-              </span>
-            </button>
-          )}
-          <input
-            ref={fileInput}
-            id="support-attachment"
-            type="file"
-            accept="image/png,image/jpeg,application/pdf"
-            className="set-visually-hidden"
-            onChange={(event) => {
-              const selected = event.target.files?.[0];
-              if (!selected) return;
-              const problem = validateAttachment(selected);
-              setFileError(problem);
-              setFile(problem ? null : selected);
-              if (problem) event.target.value = "";
-            }}
-          />
-          {fileError && <p className="field-error">{t(`error.${fileError}`)}</p>}
-        </div>
-        {error && <InlineMessage tone="error">{error}</InlineMessage>}
-        <Button type="submit" busy={busy} className="set-button--block">
-          <Icon name="send" size={17} />
-          {t("contact.submit")}
-        </Button>
-        <p className="set-form__note">{t("support.prototypeNote")}</p>
-      </form>
-    </SettingsPage>
+    <SupportPage
+      account={settings.account}
+      service={supportService}
+      onBack={back}
+      onReturn={returnToApp ?? back}
+    />
   );
 }
 

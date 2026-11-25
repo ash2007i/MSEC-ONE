@@ -1,5 +1,4 @@
 import {
-  FormEvent,
   ReactNode,
   Suspense,
   lazy,
@@ -7,11 +6,23 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import feedNavLogo from "./assets/msgi-feed-nav.png";
+import { AuthFlow } from "./auth/AuthFlow";
+import { requireVerified, type MembershipSession } from "./auth/model";
 import { createMessagingStore, type MessagingStore } from "./messaging/model";
-import { CommunityFeed } from "./feed/CommunityFeed";
+import { CommunityFeed, feedPostExists } from "./feed/CommunityFeed";
+import { ForgotPassword } from "./network/ForgotPassword";
+import { SupportPage } from "./network/SupportPage";
+import { NotificationsPage } from "./network/NotificationsPage";
+import { NotificationNavigation } from "./network/navigation";
+import { parseResetLink, validateNotifications } from "./network/model";
+import type { AppServices, NotificationTarget } from "./network/services";
+import { useAnimatedDismiss } from "./ui/motion";
+import { LocationFilter } from "./directory/LocationFilter";
+import { matchesLocation, type LocationSelection } from "./directory/locations";
 import {
   Avatar,
   BrandBar,
@@ -65,7 +76,6 @@ const ConversationScreen = lazy(() =>
 const SettingsFlow = lazy(() => import("./settings/SettingsFlow"));
 
 type Screen = "home" | "directory" | "map" | "feed" | "inbox" | "profile";
-type AuthView = "login" | "register";
 type Overlay =
   | "none"
   | "person"
@@ -73,31 +83,13 @@ type Overlay =
   | "events"
   | "edit"
   | "settings"
+  | "notifications"
   | "preview"
   | "unavailable";
 
-/** Prototype sign-in always resolves to this fictional member until real auth exists. */
+/** Signed-out appearance fallback only; never authorizes access to the application. */
 const signedInAccount = createSampleAccount();
-const currentAlumniId: AlumniId = signedInAccount.id;
 const ownHeadline = "Building thoughtful tools for growing teams.";
-
-/* Prototype-only auth session: marks this browser as signed in; no credentials are stored. */
-const authStorageKey = "msgi-one.auth.v1";
-function readAuthSession(accountId: number) {
-  try {
-    return localStorage.getItem(authStorageKey) === String(accountId);
-  } catch {
-    return false;
-  }
-}
-function writeAuthSession(accountId: number | null) {
-  try {
-    if (accountId === null) localStorage.removeItem(authStorageKey);
-    else localStorage.setItem(authStorageKey, String(accountId));
-  } catch {
-    // Storage can be unavailable (private browsing); the in-memory state still applies.
-  }
-}
 
 /** Adds this device as the current session; a fresh sign-in is also recorded as login activity. */
 function withCurrentSession(settings: UserSettings, recordLogin: boolean): UserSettings {
@@ -183,6 +175,16 @@ const people = [
   },
 ];
 
+const directoryInstitutions = [
+  ["MSEC", "Meenakshi Sundararajan Engineering College (MSEC)"],
+  ["MSSM", "Meenakshi Sundararajan School of Management (MSSM)"],
+  ["MCW", "Meenakshi College for Women (MCW)"],
+] as const;
+const graduationYears = Array.from(
+  { length: new Date().getFullYear() - 2000 + 1 },
+  (_, index) => String(2000 + index),
+);
+
 const conversations = [
   {
     ...people[0],
@@ -247,191 +249,6 @@ function BottomNav({
         </button>
       ))}
     </nav>
-  );
-}
-
-function Auth({ onSignIn, notice }: { onSignIn: () => void; notice?: string | null }) {
-  const [view, setView] = useState<AuthView>("login");
-  const [role, setRole] = useState("Alumni");
-  const [showPassword, setShowPassword] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
-  function submit(e: FormEvent) {
-    e.preventDefault();
-    setLoading(true);
-    window.setTimeout(() => {
-      setLoading(false);
-      if (view === "register") setSuccess(true);
-      else onSignIn();
-    }, 700);
-  }
-  if (success)
-    return (
-      <main className="auth-screen">
-        <div className="success-card">
-          <div className="success-icon">
-            <Icon name="check" size={30} />
-          </div>
-          <p className="eyebrow">APPLICATION RECEIVED</p>
-          <h1>Welcome to the community.</h1>
-          <p>
-            Your alumni details are being verified. We’ll notify you once your membership is active.
-          </p>
-          <button
-            className="primary-button"
-            onClick={() => {
-              setSuccess(false);
-              setView("login");
-            }}
-          >
-            Return to sign in
-          </button>
-        </div>
-      </main>
-    );
-  return (
-    <main className="auth-screen">
-      <section className="auth-intro">
-        <Logo />
-        <p>
-          Where shared history becomes
-          <br />
-          professional opportunity.
-        </p>
-      </section>
-      <form className="auth-card" onSubmit={submit}>
-        {notice && (
-          <div className="success-banner auth-notice" role="status">
-            <Icon name="info" size={16} />
-            {notice}
-          </div>
-        )}
-        <div className="auth-card__head">
-          <p className="eyebrow">{view === "login" ? "MEMBER ACCESS" : "JOIN THE NETWORK"}</p>
-          <h1>{view === "login" ? "Welcome back" : "Create your alumni profile"}</h1>
-          <p>
-            {view === "login"
-              ? "Connect with the MSGI community, wherever your career takes you."
-              : "Use your institutional details for faster verification."}
-          </p>
-        </div>
-        {view === "login" && (
-          <div className="segmented">
-            <button
-              type="button"
-              onClick={() => setRole("Alumni")}
-              className={role === "Alumni" ? "active" : ""}
-            >
-              Alumni
-            </button>
-            <button
-              type="button"
-              onClick={() => setRole("Admin")}
-              className={role === "Admin" ? "active" : ""}
-            >
-              Admin
-            </button>
-          </div>
-        )}
-        {view === "register" && (
-          <div className="field-row">
-            <label>
-              <span>First name</span>
-              <input placeholder="Aarav" required />
-            </label>
-            <label>
-              <span>Last name</span>
-              <input placeholder="Kumar" required />
-            </label>
-          </div>
-        )}
-        <label className="field">
-          <span>{view === "login" ? "Email" : "Institutional email"}</span>
-          <div className="input-wrap">
-            <Icon name="mail" size={18} />
-            <input
-              type="email"
-              placeholder={view === "login" ? "Enter your email" : "name@msgi.edu.in"}
-              required
-            />
-          </div>
-        </label>
-        {view === "register" && (
-          <div className="field-row">
-            <label>
-              <span>Department</span>
-              <select>
-                <option>Computer Science</option>
-                <option>Information Technology</option>
-                <option>Mechanical Engineering</option>
-              </select>
-            </label>
-            <label>
-              <span>Class of</span>
-              <select>
-                <option>2024</option>
-                <option>2023</option>
-                <option>2022</option>
-              </select>
-            </label>
-          </div>
-        )}
-        <label className="field">
-          <span>Password</span>
-          <div className="input-wrap">
-            <Icon name="lock" size={18} />
-            <input
-              type={showPassword ? "text" : "password"}
-              placeholder="Enter your password"
-              minLength={6}
-              required
-            />
-            <button
-              type="button"
-              aria-label="Toggle password visibility"
-              aria-pressed={showPassword}
-              onClick={() => setShowPassword(!showPassword)}
-            >
-              <Icon name="eye" size={18} />
-            </button>
-          </div>
-        </label>
-        {view === "login" && (
-          <button type="button" className="text-link forgot">
-            Forgot password?
-          </button>
-        )}
-        <button className="primary-button" disabled={loading}>
-          {loading ? (
-            <span className="spinner" />
-          ) : view === "login" ? (
-            "Sign in securely"
-          ) : (
-            "Submit for verification"
-          )}
-          {!loading && <Icon name="arrow" size={18} />}
-        </button>
-        <div className="auth-switch">
-          <span>{view === "login" ? "New to MSGI One?" : "Already a member?"}</span>
-          <button
-            type="button"
-            className="text-link"
-            onClick={() => setView(view === "login" ? "register" : "login")}
-          >
-            {view === "login" ? "Create alumni account" : "Sign in"}
-          </button>
-        </div>
-        {view === "login" && (
-          <button type="button" className="google-auth-button" onClick={onSignIn}>
-            <span aria-hidden>G</span>
-            Continue with Google
-          </button>
-        )}
-      </form>
-      <p className="auth-support">
-        Need help? <button>Contact alumni support</button>
-      </p>
-    </main>
   );
 }
 
@@ -629,7 +446,12 @@ function DirectoryScreen({
 }) {
   const [query, setQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
+  const filterPanel = useRef<HTMLElement>(null);
+  const closeFilter = useAnimatedDismiss(filterPanel, () => setFilterOpen(false));
   const [filter, setFilter] = useState("All");
+  const [graduationYear, setGraduationYear] = useState("");
+  const [institution, setInstitution] = useState("");
+  const [location, setLocation] = useState<LocationSelection | null>(null);
   const filtered = useMemo(
     () =>
       people.filter(
@@ -637,9 +459,13 @@ function DirectoryScreen({
           `${p.name} ${p.company} ${p.city} ${p.dept}`
             .toLowerCase()
             .includes(query.toLowerCase()) &&
-          (filter === "All" || p.city === filter || p.dept.includes(filter)),
+          (filter === "All" || p.city === filter || p.dept.includes(filter)) &&
+          (!graduationYear || p.year === graduationYear) &&
+          matchesLocation(p.city, location) &&
+          // Do not infer an institution from a member's department.
+          (!institution || ("institution" in p && p.institution === institution)),
       ),
-    [query, filter],
+    [query, filter, graduationYear, institution, location],
   );
   return (
     <div className="screen">
@@ -728,21 +554,25 @@ function DirectoryScreen({
               <Icon name="search" />
             </div>
             <h3>No alumni found</h3>
-            <p>Try a different name, company or location.</p>
+            <p>Try a different search, graduation year or institution.</p>
             <button
               onClick={() => {
                 setQuery("");
                 setFilter("All");
+                setGraduationYear("");
+                setInstitution("");
+                setLocation(null);
               }}
             >
-              Clear search
+              Clear search and filters
             </button>
           </div>
         )}
       </div>
       {filterOpen && (
-        <div className="sheet-backdrop" onClick={() => setFilterOpen(false)}>
+        <div className="sheet-backdrop" onClick={closeFilter}>
           <section
+            ref={filterPanel}
             className="bottom-sheet"
             role="dialog"
             aria-modal="true"
@@ -755,17 +585,34 @@ function DirectoryScreen({
                 <p className="eyebrow">REFINE RESULTS</p>
                 <h2>Directory filters</h2>
               </div>
-              <button onClick={() => setFilterOpen(false)} aria-label="Close filters">
+              <button onClick={closeFilter} aria-label="Close filters">
                 <Icon name="close" />
               </button>
             </div>
             <label>
               Graduation year
-              <div className="chips">
-                <button>2018–2020</button>
-                <button className="active">2021–2024</button>
-                <button>2025</button>
-              </div>
+              <select
+                value={graduationYear}
+                onChange={(event) => setGraduationYear(event.target.value)}
+              >
+                <option value="">All graduation years</option>
+                {graduationYears.map((year) => (
+                  <option key={year} value={year}>
+                    {year}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Institutions
+              <select value={institution} onChange={(event) => setInstitution(event.target.value)}>
+                <option value="">All institutions</option>
+                {directoryInstitutions.map(([code, name]) => (
+                  <option key={code} value={code}>
+                    {name}
+                  </option>
+                ))}
+              </select>
             </label>
             <label>
               Department
@@ -775,14 +622,7 @@ function DirectoryScreen({
                 <option>Information Technology</option>
               </select>
             </label>
-            <label>
-              Location
-              <select>
-                <option>Any location</option>
-                <option>Chennai</option>
-                <option>Bengaluru</option>
-              </select>
-            </label>
+            <LocationFilter value={location} onChange={setLocation} />
             <label className="check-row">
               <span>
                 <Icon name="shield" />
@@ -790,8 +630,8 @@ function DirectoryScreen({
               </span>
               <input type="checkbox" defaultChecked />
             </label>
-            <button className="primary-button" onClick={() => setFilterOpen(false)}>
-              Show 4 alumni
+            <button className="primary-button" onClick={closeFilter}>
+              Show {filtered.length} alumni
             </button>
           </section>
         </div>
@@ -997,20 +837,6 @@ function ProfileScreen({
         </div>
       </div>
       <div className="content profile-content">
-        <div className="profile-actions glass-panel">
-          <button onClick={edit}>
-            <FrostedIcon name="edit" />
-            Edit profile
-          </button>
-          <button>
-            <FrostedIcon name="linkedin" />
-            LinkedIn
-          </button>
-          <button onClick={() => openSettings("main")}>
-            <FrostedIcon name="settings" />
-            Settings
-          </button>
-        </div>
         <GlassPanel className="profile-section">
           <p className="eyebrow">PROFESSIONAL IDENTITY</p>
           <h2>{ownHeadline}</h2>
@@ -1212,9 +1038,20 @@ function PersonProfile({
   );
 }
 
-function EventsScreen({ onBack }: { onBack: () => void }) {
-  const [tab, setTab] = useState("Events");
+function EventsScreen({
+  onBack, destination,
+}: {
+  onBack: () => void;
+  destination?: { type: "event" | "opportunity"; id: string } | null;
+}) {
+  const [tab, setTab] = useState(destination?.type === "opportunity" ? "Opportunities" : "Events");
   const [applied, setApplied] = useState(false);
+  useEffect(() => {
+    if (!destination) return;
+    const item = document.getElementById(`network-${destination.id}`);
+    item?.scrollIntoView({ block: "center" });
+    item?.focus({ preventScroll: true });
+  }, [destination]);
   return (
     <div className="screen">
       <TopBar title="Events & opportunities" onBack={onBack} />
@@ -1238,7 +1075,7 @@ function EventsScreen({ onBack }: { onBack: () => void }) {
         </div>
         {tab === "Events" ? (
           <div className="event-list">
-            <article className="large-event">
+            <article className="large-event" id="network-leaders-table" tabIndex={-1}>
               <div className="event-visual">
                 <span>
                   28
@@ -1262,7 +1099,7 @@ function EventsScreen({ onBack }: { onBack: () => void }) {
                 </button>
               </div>
             </article>
-            <article className="simple-event">
+            <article className="simple-event" id="network-career-storytelling" tabIndex={-1}>
               <div className="date-block">
                 <strong>05</strong>
                 <span>APR</span>
@@ -1279,7 +1116,7 @@ function EventsScreen({ onBack }: { onBack: () => void }) {
           </div>
         ) : (
           <div className="opportunity-list">
-            <article>
+            <article id="network-zoho-senior-engineer" tabIndex={-1}>
               <div className="opportunity-head">
                 <span className="company-tile">Z</span>
                 <div>
@@ -1311,7 +1148,7 @@ function EventsScreen({ onBack }: { onBack: () => void }) {
                 )}
               </button>
             </article>
-            <article>
+            <article id="network-freshworks-design-lead" tabIndex={-1}>
               <div className="opportunity-head">
                 <span className="company-tile blue">F</span>
                 <div>
@@ -1480,21 +1317,32 @@ const reportablePeople: ReportablePerson[] = people.map(({ id, name, dept, year 
   year,
 }));
 
-export default function App() {
+const disconnectedServices: AppServices = {};
+
+export default function App({ services = disconnectedServices }: { services?: AppServices }) {
   const [messaging] = useState(() => createMessagingStore(conversations));
   useEffect(() => () => messaging.dispose(), [messaging]);
-  const account = signedInAccount;
-  const [signedIn, setSignedIn] = useState(() => readAuthSession(account.id));
+  const [account, setAccount] = useState(signedInAccount);
+  const currentAlumniId: AlumniId = account.id;
+  const [signedIn, setSignedIn] = useState(false);
+  const [authEntryView, setAuthEntryView] = useState<"register" | "login">("register");
   // Loaded before sign-in so this device's appearance applies to the sign-in screen too.
   const [settings, setSettings] = useState<UserSettings>(() => {
-    const stored = loadSettings(account);
-    return readAuthSession(account.id) ? withCurrentSession(stored, false) : stored;
+    return loadSettings(account);
   });
   const [screen, setScreen] = useState<Screen>("home");
   const [overlay, setOverlay] = useState<Overlay>("none");
   const [settingsStack, setSettingsStack] = useState<SettingsRoute[]>([]);
   const [selectedPerson, setSelectedPerson] = useState(1);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [resetLink, setResetLink] = useState(() => parseResetLink(window.location.hash));
+  const [accessPage, setAccessPage] = useState<"login" | "forgot" | "support">(
+    () => parseResetLink(window.location.hash).requested ? "forgot" : "login",
+  );
+  const [notificationUnread, setNotificationUnread] = useState(0);
+  const [feedTarget, setFeedTarget] = useState<string | null>(null);
+  const [feedCreationOpen, setFeedCreationOpen] = useState(false);
+  const [eventTarget, setEventTarget] = useState<{ type: "event" | "opportunity"; id: string } | null>(null);
   const [pendingProfileId, setPendingProfileId] = useState<number | null>(() =>
     typeof window === "undefined" ? null : parseSharedProfileId(window.location.search),
   );
@@ -1513,6 +1361,38 @@ export default function App() {
     name: settings.account.fullName,
     role: settings.account.role,
     image: settings.account.avatar,
+  };
+  useEffect(() => {
+    const onHashChange = () => {
+      const link = parseResetLink(window.location.hash);
+      setResetLink(link);
+      if (link.requested) setAccessPage("forgot");
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+  useEffect(() => {
+    if (!signedIn || !services.notifications) return;
+    const controller = new AbortController();
+    void services.notifications.list(controller.signal).then(
+      (items) => {
+        if (controller.signal.aborted) return;
+        try {
+          setNotificationUnread(validateNotifications(items).filter((item) => !item.read).length);
+        } catch {
+          setNotificationUnread(0);
+        }
+      },
+      () => { if (!controller.signal.aborted) setNotificationUnread(0); },
+    );
+    return () => controller.abort();
+  }, [signedIn, services.notifications]);
+  const returnToLogin = () => {
+    setAuthEntryView("login");
+    setAccessPage("login");
+    setResetLink({ requested: false, token: null });
+    if (parseResetLink(window.location.hash).requested)
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
   };
 
   useEffect(() => {
@@ -1565,6 +1445,30 @@ export default function App() {
     setSettingsStack([route]);
     setOverlay("settings");
   };
+  const openNotificationTarget = (target: NotificationTarget): string | null => {
+    if (target.type === "profile") {
+      if (target.id === account.id) setOverlay("preview");
+      else if (people.some((person) => person.id === target.id)) openPerson(target.id);
+      else return "This profile is no longer available.";
+    } else if (target.type === "message") {
+      if (!conversations.some((conversation) => conversation.id === target.id))
+        return "This conversation is no longer available.";
+      openChat(target.id);
+    } else if (target.type === "feed") {
+      if (!feedPostExists(target.id)) return "This post is no longer available.";
+      setFeedTarget(target.id);
+      setScreen("feed");
+      setOverlay("none");
+    } else {
+      const ids = target.type === "event"
+        ? ["leaders-table", "career-storytelling"]
+        : ["zoho-senior-engineer", "freshworks-design-lead"];
+      if (!ids.includes(target.id)) return "This item is no longer available.";
+      setEventTarget({ type: target.type, id: target.id });
+      setOverlay("events");
+    }
+    return null;
+  };
   const settingsBack = () => {
     // Leaving the first Settings screen returns to wherever Settings was opened from.
     if (settingsStack.length <= 1) {
@@ -1578,17 +1482,30 @@ export default function App() {
     setOverlay("settings");
   };
 
-  const signIn = () => {
-    writeAuthSession(account.id);
-    setSettings((current) => withCurrentSession(current, true));
+  const openWebsitePreview = () => {
+    if (services.membershipAuth) return;
+    setAccount(signedInAccount);
+    setSettings(loadSettings(signedInAccount));
     setAuthNotice(null);
     setPublicViewDismissed(false);
     setScreen("home");
     setOverlay("none");
     setSignedIn(true);
+    returnToLogin();
   };
-  const logout = (notice?: string) => {
-    writeAuthSession(null);
+  const signIn = (result: Extract<MembershipSession, { status: "verified" }>) => {
+    const session = requireVerified(result);
+    setAccount(session.account);
+    setSettings(withCurrentSession(loadSettings(session.account), true));
+    setAuthNotice(null);
+    setPublicViewDismissed(false);
+    setScreen("home");
+    setOverlay("none");
+    setSignedIn(true);
+    returnToLogin();
+  };
+  const logout = async (notice?: string) => {
+    if (services.membershipAuth) await services.membershipAuth.signOut(new AbortController().signal);
     setSettings((current) => ({
       ...current,
       security: {
@@ -1601,6 +1518,8 @@ export default function App() {
     setOverlay("none");
     setSettingsStack([]);
     setAuthNotice(notice ?? null);
+    returnToLogin();
+    setNotificationUnread(0);
   };
   const deleteAccount = () => {
     clearStoredSettings(account.id);
@@ -1642,7 +1561,7 @@ export default function App() {
     removeSharedProfileParam();
   }, [signedIn, pendingProfileId, sharedTarget]);
 
-  if (!signedIn) {
+  if (!signedIn || resetLink.requested) {
     const showPublicProfile =
       sharedTarget === "self" && privacy.profileVisibility === "public" && !publicViewDismissed;
     const linkNotice =
@@ -1656,7 +1575,16 @@ export default function App() {
     return (
       <div className="app-stage">
         <div className="phone-shell">
-          {showPublicProfile ? (
+          {accessPage === "forgot" ? (
+            <ForgotPassword key={resetLink.requested ? resetLink.token ?? "invalid-reset" : "request-reset"}
+              service={services.auth} resetRequested={resetLink.requested}
+              token={resetLink.token} onLogin={() => {
+                if (signedIn) logout();
+                else returnToLogin();
+              }} />
+          ) : accessPage === "support" ? (
+            <SupportPage service={services.support} onBack={returnToLogin} onReturn={returnToLogin} />
+          ) : showPublicProfile ? (
             <ProfilePreview
               account={settings.account}
               privacy={privacy}
@@ -1670,7 +1598,10 @@ export default function App() {
               onSignIn={() => setPublicViewDismissed(true)}
             />
           ) : (
-            <Auth onSignIn={signIn} notice={linkNotice ?? authNotice} />
+            <AuthFlow service={services.membershipAuth} initialView={authEntryView} onVerified={signIn} notice={linkNotice ?? authNotice}
+              onPreview={services.membershipAuth ? undefined : openWebsitePreview}
+              onForgotPassword={() => setAccessPage("forgot")}
+              onSupport={() => setAccessPage("support")} />
           )}
         </div>
         <div className="desktop-note">
@@ -1686,7 +1617,13 @@ export default function App() {
     );
   }
   let content: ReactNode;
-  if (overlay === "settings" && settingsStack.length)
+  if (overlay === "notifications")
+    content = (
+      <NotificationsPage service={services.notifications}
+        onBack={() => setOverlay("none")} onNavigate={openNotificationTarget}
+        onUnreadChange={setNotificationUnread} />
+    );
+  else if (overlay === "settings" && settingsStack.length)
     content = (
       <Suspense
         fallback={
@@ -1710,6 +1647,8 @@ export default function App() {
           previewProfile={() => setOverlay("preview")}
           profileUrl={profileUrl}
           reportablePeople={reportablePeople}
+          supportService={services.support}
+          returnToApp={() => { setOverlay("none"); setSettingsStack([]); }}
         />
       </Suspense>
     );
@@ -1746,7 +1685,10 @@ export default function App() {
         viewProfile={() => setOverlay("person")}
       />
     );
-  else if (overlay === "events") content = <EventsScreen onBack={() => setOverlay("none")} />;
+  else if (overlay === "events")
+    content = <EventsScreen destination={eventTarget} onBack={() => {
+      setEventTarget(null); setOverlay("none");
+    }} />;
   else if (overlay === "edit")
     content = (
       <EditProfile
@@ -1784,7 +1726,7 @@ export default function App() {
       />
     );
   else if (screen === "feed")
-    content = <CommunityFeed profile={mainProfile} onProfile={() => setScreen("profile")} />;
+    content = <CommunityFeed profile={mainProfile} onProfile={() => setScreen("profile")} focusPostId={feedTarget} onCreationChange={setFeedCreationOpen} />;
   else if (screen === "inbox")
     content = (
       <InboxScreen
@@ -1807,10 +1749,13 @@ export default function App() {
       />
     );
   return (
+    <NotificationNavigation.Provider value={{
+      open: () => setOverlay("notifications"), unread: notificationUnread,
+    }}>
     <div className="app-stage app-stage--signed">
       <div className="phone-shell">
         {content}
-        {overlay === "none" && <BottomNav screen={screen} setScreen={setScreen} t={t} />}
+        {overlay === "none" && !(screen === "feed" && feedCreationOpen) && <BottomNav screen={screen} setScreen={setScreen} t={t} />}
       </div>
       <div className="desktop-note">
         <Logo />
@@ -1827,5 +1772,6 @@ export default function App() {
         </div>
       </div>
     </div>
+    </NotificationNavigation.Provider>
   );
 }

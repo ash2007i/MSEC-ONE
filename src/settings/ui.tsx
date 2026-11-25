@@ -16,6 +16,8 @@ import {
 import { FrostedIcon, Icon, TopBar, type IconName } from "../ui/chrome";
 import type { Translator } from "./i18n";
 import { NetworkError, type ResolvedTheme, type SettingsSection, type UserSettings } from "./model";
+import type { SupportService } from "../network/services";
+import { useAnimatedDismiss } from "../ui/motion";
 
 export type SettingsRoute =
   | "main"
@@ -41,6 +43,8 @@ export type ToastTone = "success" | "error" | "info";
 export type ReportablePerson = { id: number; name: string; dept: string; year: string };
 
 export type SettingsContextValue = {
+  supportService?: SupportService;
+  returnToApp?: () => void;
   settings: UserSettings;
   update: <K extends SettingsSection>(
     section: K,
@@ -352,12 +356,13 @@ export function Sheet({
   title: string;
   eyebrow?: string;
   onClose: () => void;
-  children: ReactNode;
+  children: ReactNode | ((dismiss: () => void) => ReactNode);
 }) {
   const { t, sheetHost } = useSettings();
   const ref = useRef<HTMLElement>(null);
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
+  const dismiss = useAnimatedDismiss(ref, onClose);
+  const closeRef = useRef(dismiss);
+  closeRef.current = dismiss;
   const titleId = useId();
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
@@ -412,7 +417,7 @@ export function Sheet({
             <Icon name="close" />
           </button>
         </div>
-        {children}
+        {typeof children === "function" ? children(dismiss) : children}
       </section>
     </div>
   );
@@ -462,6 +467,7 @@ export function ConfirmSheet({
   }
   return (
     <Sheet title={title} onClose={() => !busy && onClose()}>
+      {(dismiss) => <>
       {body && (
         <div className="set-sheet__body" tabIndex={-1}>
           {body}
@@ -470,7 +476,7 @@ export function ConfirmSheet({
       {children}
       {error && <InlineMessage tone="error">{error}</InlineMessage>}
       <SheetActions>
-        <Button variant="secondary" onClick={onClose} disabled={busy}>
+        <Button variant="secondary" onClick={dismiss} disabled={busy}>
           {cancelLabel ?? t("common.cancel")}
         </Button>
         <Button
@@ -482,6 +488,7 @@ export function ConfirmSheet({
           {confirmLabel}
         </Button>
       </SheetActions>
+      </>}
     </Sheet>
   );
 }
@@ -501,6 +508,7 @@ export function ChoiceSheet<T extends string>({
 }) {
   return (
     <Sheet title={title} onClose={onClose}>
+      {(dismiss) =>
       <div className="set-group set-group--sheet" role="radiogroup" aria-label={title}>
         {options.map((option) => (
           <RadioRow
@@ -510,11 +518,12 @@ export function ChoiceSheet<T extends string>({
             selected={option.value === value}
             onSelect={() => {
               onSelect(option.value);
-              onClose();
+              dismiss();
             }}
           />
         ))}
       </div>
+      }
     </Sheet>
   );
 }
@@ -536,12 +545,12 @@ function FieldFrame({
   children,
   counter,
 }: FieldBase & { children: ReactNode; counter?: ReactNode }) {
-  const { t } = useSettings();
+  const context = useContext(SettingsContext);
   return (
     <div className="field set-field">
       <label htmlFor={id}>
         {label}
-        {optional && <em>{t("common.optional")}</em>}
+        {optional && <em>{context?.t("common.optional") ?? "Optional"}</em>}
       </label>
       {children}
       {(error || hint || counter) && (
