@@ -1,6 +1,19 @@
 import { useMemo, useRef, useState, type ChangeEvent } from "react";
 import qrcode from "qrcode-generator";
-import { Avatar, FrostedIcon, Icon, VerifyBadge, type IconName } from "../ui/chrome";
+import {
+  Avatar,
+  FrostedIcon,
+  Icon,
+  VerifyBadge,
+  type IconName,
+} from "../ui/chrome";
+import { useAuth } from "../backend/AuthContext";
+import {
+  signIn as backendSignIn,
+  updatePassword as backendUpdatePassword,
+} from "../backend/auth";
+import { updateMyProfile, upsertMyPrivateDetails } from "../backend/profile";
+import { supabase } from "../backend/supabase";
 import {
   audienceOptions,
   checkPassword,
@@ -62,20 +75,31 @@ function useAsyncAction() {
 }
 
 export function PasswordSheet({ onClose }: { onClose: () => void }) {
-  const { t, update, notify } = useSettings();
+  const { t, settings, update, notify } = useSettings();
   const [values, setValues] = useState({ current: "", next: "", confirm: "" });
   const [visible, setVisible] = useState(false);
   const [touched, setTouched] = useState(false);
   const { busy, error, run } = useAsyncAction();
-  const { rules, valid } = checkPassword(values.current, values.next, values.confirm);
-  const set = (key: keyof typeof values) => (event: ChangeEvent<HTMLInputElement>) =>
-    setValues((current) => ({ ...current, [key]: event.target.value }));
+  const { rules, valid } = checkPassword(
+    values.current,
+    values.next,
+    values.confirm,
+  );
+  const set =
+    (key: keyof typeof values) => (event: ChangeEvent<HTMLInputElement>) =>
+      setValues((current) => ({ ...current, [key]: event.target.value }));
   async function submit() {
     setTouched(true);
     if (!valid) return;
-    const ok = await run(() => simulateRequest(true));
+    const ok = await run(async () => {
+      await backendSignIn(settings.account.email, values.current);
+      await backendUpdatePassword(values.next);
+    });
     if (!ok) return;
-    update("security", (current) => ({ ...current, passwordChangedAt: new Date().toISOString() }));
+    update("security", (current) => ({
+      ...current,
+      passwordChangedAt: new Date().toISOString(),
+    }));
     notify(t("password.saved"));
     onClose();
   }
@@ -84,7 +108,7 @@ export function PasswordSheet({ onClose }: { onClose: () => void }) {
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          submit();
+          void submit();
         }}
       >
         <TextField
@@ -95,7 +119,9 @@ export function PasswordSheet({ onClose }: { onClose: () => void }) {
           autoComplete="current-password"
           value={values.current}
           onChange={set("current")}
-          error={touched && !values.current ? t("error.passwordRequired") : undefined}
+          error={
+            touched && !values.current ? t("error.passwordRequired") : undefined
+          }
         />
         <TextField
           id="password-new"
@@ -117,14 +143,21 @@ export function PasswordSheet({ onClose }: { onClose: () => void }) {
         />
         <ul className="set-checklist" aria-label={t("password.new")}>
           {(Object.keys(rules) as (keyof typeof rules)[]).map((rule) => (
-            <li key={rule} className={rules[rule] ? "is-met" : touched ? "is-missing" : ""}>
+            <li
+              key={rule}
+              className={rules[rule] ? "is-met" : touched ? "is-missing" : ""}
+            >
               <Icon name={rules[rule] ? "check" : "minus"} size={14} />
               {t(`password.rule.${rule}`)}
             </li>
           ))}
         </ul>
         <label className="set-check">
-          <input type="checkbox" checked={visible} onChange={(event) => setVisible(event.target.checked)} />
+          <input
+            type="checkbox"
+            checked={visible}
+            onChange={(event) => setVisible(event.target.checked)}
+          />
           {t("password.show")}
         </label>
         {error && <InlineMessage tone="error">{error}</InlineMessage>}
@@ -143,6 +176,7 @@ export function PasswordSheet({ onClose }: { onClose: () => void }) {
 
 function NameSheet({ onClose }: { onClose: () => void }) {
   const { t, settings, update, notify } = useSettings();
+  const { refreshProfile } = useAuth();
   const [name, setName] = useState(settings.account.fullName);
   const [touched, setTouched] = useState(false);
   const { busy, error, run } = useAsyncAction();
@@ -151,7 +185,10 @@ function NameSheet({ onClose }: { onClose: () => void }) {
     setTouched(true);
     if (validation) return;
     const fullName = name.trim().replace(/\s+/g, " ");
-    const ok = await run(() => simulateRequest(true));
+    const ok = await run(async () => {
+      await updateMyProfile({ full_name: fullName });
+      await refreshProfile();
+    });
     if (!ok) return;
     update("account", (current) => ({ ...current, fullName }));
     notify(t("account.name.saved"));
@@ -162,7 +199,7 @@ function NameSheet({ onClose }: { onClose: () => void }) {
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          save();
+          void save();
         }}
       >
         <TextField
@@ -180,7 +217,11 @@ function NameSheet({ onClose }: { onClose: () => void }) {
           <Button variant="secondary" onClick={onClose} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button type="submit" busy={busy} disabled={name.trim() === settings.account.fullName}>
+          <Button
+            type="submit"
+            busy={busy}
+            disabled={name.trim() === settings.account.fullName}
+          >
             {t("common.save")}
           </Button>
         </SheetActions>
@@ -190,25 +231,45 @@ function NameSheet({ onClose }: { onClose: () => void }) {
 }
 
 /** Email and phone changes require the current password and an explicit confirmation step. */
-function ContactChangeSheet({ kind, onClose }: { kind: "email" | "phone"; onClose: () => void }) {
+function ContactChangeSheet({
+  kind,
+  onClose,
+}: {
+  kind: "email" | "phone";
+  onClose: () => void;
+}) {
   const { t, settings, update, notify } = useSettings();
+  const { refreshProfile } = useAuth();
   const current = settings.account[kind];
   const [value, setValue] = useState("");
   const [password, setPassword] = useState("");
   const [touched, setTouched] = useState(false);
   const [confirming, setConfirming] = useState(false);
-  const validation = kind === "email" ? validateEmail(value, current) : validatePhone(value, current);
-  const formatted = kind === "email" ? value.trim() : value.trim().replace(/\s+/g, " ");
+  const validation =
+    kind === "email"
+      ? validateEmail(value, current)
+      : validatePhone(value, current);
+  const formatted =
+    kind === "email" ? value.trim() : value.trim().replace(/\s+/g, " ");
   if (confirming)
     return (
       <ConfirmSheet
-        title={t(kind === "email" ? "account.email.confirmTitle" : "account.phone.confirmTitle")}
+        title={t(
+          kind === "email"
+            ? "account.email.confirmTitle"
+            : "account.phone.confirmTitle",
+        )}
         body={
           <>
             <p>
-              {t(kind === "email" ? "account.email.confirmBody" : "account.phone.confirmBody", {
-                value: formatted,
-              })}
+              {t(
+                kind === "email"
+                  ? "account.email.confirmBody"
+                  : "account.phone.confirmBody",
+                {
+                  value: formatted,
+                },
+              )}
             </p>
             <p className="set-sheet__muted">{t("account.serverNote")}</p>
           </>
@@ -216,7 +277,16 @@ function ContactChangeSheet({ kind, onClose }: { kind: "email" | "phone"; onClos
         confirmLabel={t("account.confirmChange")}
         onClose={() => setConfirming(false)}
         onConfirm={async () => {
-          await simulateRequest(true);
+          await backendSignIn(settings.account.email, password);
+          if (kind === "phone") {
+            await upsertMyPrivateDetails({ phone: formatted });
+            await refreshProfile();
+          } else {
+            const { error } = await supabase.auth.updateUser({
+              email: formatted,
+            });
+            if (error) throw error;
+          }
           update("account", (account) => ({ ...account, [kind]: formatted }));
           if (kind === "phone")
             update("security", (security) =>
@@ -224,14 +294,18 @@ function ContactChangeSheet({ kind, onClose }: { kind: "email" | "phone"; onClos
                 ? { ...security, recoveryPhone: formatted }
                 : security,
             );
-          notify(t(kind === "email" ? "account.email.saved" : "account.phone.saved"));
+          notify(
+            t(kind === "email" ? "account.email.saved" : "account.phone.saved"),
+          );
           onClose();
         }}
       />
     );
   return (
     <Sheet
-      title={t(kind === "email" ? "account.changeEmail" : "account.changePhone")}
+      title={t(
+        kind === "email" ? "account.changeEmail" : "account.changePhone",
+      )}
       onClose={onClose}
     >
       <form
@@ -248,7 +322,9 @@ function ContactChangeSheet({ kind, onClose }: { kind: "email" | "phone"; onClos
         />
         <TextField
           id={`account-${kind}`}
-          label={t(kind === "email" ? "account.email.new" : "account.phone.new")}
+          label={t(
+            kind === "email" ? "account.email.new" : "account.phone.new",
+          )}
           icon={kind === "email" ? "mail" : "phone"}
           type={kind === "email" ? "email" : "tel"}
           inputMode={kind === "email" ? "email" : "tel"}
@@ -281,7 +357,9 @@ function ContactChangeSheet({ kind, onClose }: { kind: "email" | "phone"; onClos
 
 function ConnectedAccountsSheet({ onClose }: { onClose: () => void }) {
   const { t, settings, update, notify } = useSettings();
-  const [disconnecting, setDisconnecting] = useState<"linkedin" | "google" | null>(null);
+  const [disconnecting, setDisconnecting] = useState<
+    "linkedin" | "google" | null
+  >(null);
   const [pending, setPending] = useState<"linkedin" | "google" | null>(null);
   const [error, setError] = useState("");
   const accounts = settings.account.connectedAccounts;
@@ -314,7 +392,9 @@ function ConnectedAccountsSheet({ onClose }: { onClose: () => void }) {
     try {
       await simulateRequest(true);
       setConnected(provider, true);
-      notify(t("connected.connectedToast", { provider: t(`connected.${provider}`) }));
+      notify(
+        t("connected.connectedToast", { provider: t(`connected.${provider}`) }),
+      );
     } catch (caught) {
       setError(errorMessage(caught, t));
     } finally {
@@ -327,11 +407,17 @@ function ConnectedAccountsSheet({ onClose }: { onClose: () => void }) {
       <div className="set-group set-group--sheet">
         {(["linkedin", "google"] as const).map((provider) => (
           <div className="set-row" key={provider}>
-            <FrostedIcon name={provider === "linkedin" ? "linkedin" : "globe"} />
+            <FrostedIcon
+              name={provider === "linkedin" ? "linkedin" : "globe"}
+            />
             <span className="set-row__main">
               <span className="set-row__text">
                 <b>{t(`connected.${provider}`)}</b>
-                <small>{accounts[provider] ? t("connected.on") : t("connected.offState")}</small>
+                <small>
+                  {accounts[provider]
+                    ? t("connected.on")
+                    : t("connected.offState")}
+                </small>
               </span>
               <span className="set-row__trail">
                 <Button
@@ -339,10 +425,14 @@ function ConnectedAccountsSheet({ onClose }: { onClose: () => void }) {
                   className="set-button--compact"
                   busy={pending === provider}
                   onClick={() =>
-                    accounts[provider] ? setDisconnecting(provider) : connect(provider)
+                    accounts[provider]
+                      ? setDisconnecting(provider)
+                      : void connect(provider)
                   }
                 >
-                  {accounts[provider] ? t("connected.disconnect") : t("connected.connect")}
+                  {accounts[provider]
+                    ? t("connected.disconnect")
+                    : t("connected.connect")}
                 </Button>
               </span>
             </span>
@@ -368,14 +458,19 @@ function DeleteAccountFlow({ onClose }: { onClose: () => void }) {
           <>
             <p>{t("delete.intro")}</p>
             <ul className="set-consequences">
-              {(["delete.point1", "delete.point2", "delete.point3", "delete.point4"] as const).map(
-                (key) => (
-                  <li key={key}>
-                    <Icon name="alert" size={15} />
-                    {t(key)}
-                  </li>
-                ),
-              )}
+              {(
+                [
+                  "delete.point1",
+                  "delete.point2",
+                  "delete.point3",
+                  "delete.point4",
+                ] as const
+              ).map((key) => (
+                <li key={key}>
+                  <Icon name="alert" size={15} />
+                  {t(key)}
+                </li>
+              ))}
             </ul>
           </>
         }
@@ -420,7 +515,14 @@ function DeleteAccountFlow({ onClose }: { onClose: () => void }) {
 
 /* ---------- Account information ---------- */
 
-type AccountSheet = "name" | "email" | "phone" | "password" | "connected" | "deactivate" | "delete";
+type AccountSheet =
+  | "name"
+  | "email"
+  | "phone"
+  | "password"
+  | "connected"
+  | "deactivate"
+  | "delete";
 
 export function AccountScreen() {
   const { t, settings, logout } = useSettings();
@@ -429,9 +531,19 @@ export function AccountScreen() {
   const close = () => setSheet(null);
   const editIcon = <Icon name="edit" size={16} className="set-row__chevron" />;
   return (
-    <SettingsPage title={t("account.title")} description={t("account.description")}>
+    <SettingsPage
+      title={t("account.title")}
+      description={t("account.description")}
+    >
       <div className="glass-panel set-account-card set-account-card--static">
-        <Avatar person={{ name: account.fullName, role: account.role, image: account.avatar }} size="lg" />
+        <Avatar
+          person={{
+            name: account.fullName,
+            role: account.role,
+            image: account.avatar,
+          }}
+          size="lg"
+        />
         <span className="set-account-card__text">
           <b>{account.fullName}</b>
           <span>{account.email}</span>
@@ -461,7 +573,10 @@ export function AccountScreen() {
           onClick={() => setSheet("phone")}
         />
       </Section>
-      <Section title={t("account.institutionDetails")} note={<p>{t("account.lockedNote")}</p>}>
+      <Section
+        title={t("account.institutionDetails")}
+        note={<p>{t("account.lockedNote")}</p>}
+      >
         <DetailRow
           icon="book"
           label={t("account.department")}
@@ -474,24 +589,52 @@ export function AccountScreen() {
           value={account.graduationYear}
           trailing={<Icon name="lock" size={15} className="set-row__chevron" />}
         />
-        <DetailRow icon="building" label={t("account.institution")} value={account.institution} />
-        <DetailRow icon="users" label={t("account.status")} value={t("account.alumni")} />
+        <DetailRow
+          icon="building"
+          label={t("account.institution")}
+          value={account.institution}
+        />
+        <DetailRow
+          icon="users"
+          label={t("account.status")}
+          value={t("account.alumni")}
+        />
         <DetailRow
           icon="shield"
           label={t("account.verification")}
           value={
-            <span className="set-verified">
-              <Icon name="check" size={14} />
-              {t("account.verified")}
-            </span>
+            account.verified ? (
+              <span className="set-verified">
+                <Icon name="check" size={14} />
+                {t("account.verified")}
+              </span>
+            ) : (
+              <span>Pending verification</span>
+            )
           }
         />
       </Section>
       <Section title={t("account.actions")}>
-        <NavRow icon="mail" title={t("account.changeEmail")} onClick={() => setSheet("email")} />
-        <NavRow icon="phone" title={t("account.changePhone")} onClick={() => setSheet("phone")} />
-        <NavRow icon="key" title={t("account.changePassword")} onClick={() => setSheet("password")} />
-        <NavRow icon="link" title={t("account.connected")} onClick={() => setSheet("connected")} />
+        <NavRow
+          icon="mail"
+          title={t("account.changeEmail")}
+          onClick={() => setSheet("email")}
+        />
+        <NavRow
+          icon="phone"
+          title={t("account.changePhone")}
+          onClick={() => setSheet("phone")}
+        />
+        <NavRow
+          icon="key"
+          title={t("account.changePassword")}
+          onClick={() => setSheet("password")}
+        />
+        <NavRow
+          icon="link"
+          title={t("account.connected")}
+          onClick={() => setSheet("connected")}
+        />
       </Section>
       <Section>
         <NavRow
@@ -509,7 +652,9 @@ export function AccountScreen() {
       </Section>
 
       {sheet === "name" && <NameSheet onClose={close} />}
-      {(sheet === "email" || sheet === "phone") && <ContactChangeSheet kind={sheet} onClose={close} />}
+      {(sheet === "email" || sheet === "phone") && (
+        <ContactChangeSheet kind={sheet} onClose={close} />
+      )}
       {sheet === "password" && <PasswordSheet onClose={close} />}
       {sheet === "connected" && <ConnectedAccountsSheet onClose={close} />}
       {sheet === "deactivate" && (
@@ -540,7 +685,8 @@ function QrCode({ value, label }: { value: string; label: string }) {
     const count = qr.getModuleCount();
     let d = "";
     for (let row = 0; row < count; row++)
-      for (let col = 0; col < count; col++) if (qr.isDark(row, col)) d += `M${col} ${row}h1v1h-1z`;
+      for (let col = 0; col < count; col++)
+        if (qr.isDark(row, col)) d += `M${col} ${row}h1v1h-1z`;
     return { path: d, size: count };
   }, [value]);
   // Quiet zone of four modules keeps the code scannable; colours stay fixed in both themes.
@@ -579,10 +725,14 @@ async function copyText(text: string, fallbackInput: HTMLInputElement | null) {
 }
 
 export function ShareScreen() {
-  const { t, settings, profileUrl, notify, navigate, previewProfile } = useSettings();
+  const { t, settings, profileUrl, notify, navigate, previewProfile } =
+    useSettings();
   const { account, privacy } = settings;
   const inputRef = useRef<HTMLInputElement>(null);
-  async function copy(toastTone: ToastTone = "success", message = t("share.copied")) {
+  async function copy(
+    toastTone: ToastTone = "success",
+    message = t("share.copied"),
+  ) {
     const ok = await copyText(profileUrl, inputRef.current);
     if (ok) notify(message, toastTone);
     else {
@@ -600,7 +750,8 @@ export function ShareScreen() {
         });
         return;
       } catch (caught) {
-        if (caught instanceof DOMException && caught.name === "AbortError") return;
+        if (caught instanceof DOMException && caught.name === "AbortError")
+          return;
       }
     }
     await copy("info", t("share.unsupported"));
@@ -610,16 +761,27 @@ export function ShareScreen() {
     <SettingsPage title={t("share.title")} description={t("share.description")}>
       <div className="glass-panel set-share-card">
         <div className="set-share-card__person">
-          <Avatar person={{ name: account.fullName, role: account.role, image: account.avatar }} size="md" />
+          <Avatar
+            person={{
+              name: account.fullName,
+              role: account.role,
+              image: account.avatar,
+            }}
+            size="md"
+          />
           <div>
             <b>{account.fullName}</b>
             <span>
-              {account.department} · {t("account.classOf", { year: account.graduationYear })}
+              {account.department} ·{" "}
+              {t("account.classOf", { year: account.graduationYear })}
             </span>
           </div>
         </div>
         <div className="set-qr-frame">
-          <QrCode value={profileUrl} label={`${t("share.scan")}: ${profileUrl}`} />
+          <QrCode
+            value={profileUrl}
+            label={`${t("share.scan")}: ${profileUrl}`}
+          />
         </div>
         <p className="set-share-card__caption">
           <Icon name="qr" size={15} />
@@ -638,11 +800,11 @@ export function ShareScreen() {
           />
         </div>
         <div className="set-button-row">
-          <Button variant="secondary" onClick={() => copy()}>
+          <Button variant="secondary" onClick={() => void copy()}>
             <Icon name="copy" size={17} />
             {t("share.copy")}
           </Button>
-          <Button onClick={share}>
+          <Button onClick={() => void share()}>
             <Icon name="share" size={17} />
             {t("share.share")}
           </Button>
@@ -653,7 +815,11 @@ export function ShareScreen() {
           tone={access === "private" ? "warning" : "info"}
           action={
             access === "private" && (
-              <button type="button" className="text-link set-inline-link" onClick={() => navigate("privacy")}>
+              <button
+                type="button"
+                className="text-link set-inline-link"
+                onClick={() => navigate("privacy")}
+              >
                 {t("share.changeVisibility")}
               </button>
             )
@@ -663,7 +829,11 @@ export function ShareScreen() {
         </InlineMessage>
       </Section>
       <Section>
-        <NavRow icon="eye" title={t("share.preview")} onClick={previewProfile} />
+        <NavRow
+          icon="eye"
+          title={t("share.preview")}
+          onClick={previewProfile}
+        />
       </Section>
     </SettingsPage>
   );
@@ -685,28 +855,47 @@ const fieldIcons: Record<(typeof personalFields)[number], IconName> = {
 export function PrivacyScreen() {
   const { t, settings, update, notify, navigate } = useSettings();
   const { privacy } = settings;
-  const [picker, setPicker] = useState<"messageRequests" | "directContact" | null>(null);
+  const [picker, setPicker] = useState<
+    "messageRequests" | "directContact" | null
+  >(null);
   const setVisibility = (profileVisibility: ProfileVisibility) => {
     if (profileVisibility === privacy.profileVisibility) return;
     update("privacy", (current) => ({ ...current, profileVisibility }));
     notify(t("common.saved"));
   };
-  const audienceChoices = audienceOptions.map((value) => ({ value, label: t(`audience.${value}`) }));
+  const audienceChoices = audienceOptions.map((value) => ({
+    value,
+    label: t(`audience.${value}`),
+  }));
   return (
-    <SettingsPage title={t("privacy.title")} description={t("privacy.description")}>
+    <SettingsPage
+      title={t("privacy.title")}
+      description={t("privacy.description")}
+    >
       <Section
         title={t("privacy.profileVisibility")}
-        groupProps={{ role: "radiogroup", "aria-label": t("privacy.profileVisibility") }}
+        groupProps={{
+          role: "radiogroup",
+          "aria-label": t("privacy.profileVisibility"),
+        }}
       >
         {profileVisibilityOptions.map((option) => (
           <RadioRow
             key={option}
-            icon={option === "alumni" ? "users" : option === "private" ? "lock" : "globe"}
+            icon={
+              option === "alumni"
+                ? "users"
+                : option === "private"
+                  ? "lock"
+                  : "globe"
+            }
             title={t(`visibility.${option}`)}
             description={t(`visibility.${option}.desc`)}
             extra={
               option === "public" && (
-                <small className="set-policy">{t("visibility.public.policy")}</small>
+                <small className="set-policy">
+                  {t("visibility.public.policy")}
+                </small>
               )
             }
             selected={privacy.profileVisibility === option}
@@ -720,7 +909,9 @@ export function PrivacyScreen() {
             key={field}
             icon={fieldIcons[field]}
             title={t(`privacy.field.${field}`)}
-            description={privacy.fields[field] ? t("common.visible") : t("common.hidden")}
+            description={
+              privacy.fields[field] ? t("common.visible") : t("common.hidden")
+            }
             checked={privacy.fields[field]}
             onChange={(value) =>
               update("privacy", (current) => ({
@@ -750,7 +941,10 @@ export function PrivacyScreen() {
           description={t("privacy.nonConnections.desc")}
           checked={privacy.nonConnectionMessages}
           onChange={(nonConnectionMessages) =>
-            update("privacy", (current) => ({ ...current, nonConnectionMessages }))
+            update("privacy", (current) => ({
+              ...current,
+              nonConnectionMessages,
+            }))
           }
         />
       </Section>
@@ -768,7 +962,9 @@ export function PrivacyScreen() {
           title={t("privacy.locationVisible")}
           description={t("privacy.locationVisible.desc")}
           checked={privacy.locationVisible}
-          onChange={(locationVisible) => update("privacy", (current) => ({ ...current, locationVisible }))}
+          onChange={(locationVisible) =>
+            update("privacy", (current) => ({ ...current, locationVisible }))
+          }
         />
       </Section>
       <Section>
@@ -798,10 +994,15 @@ export function PrivacyScreen() {
 
 export function BlockedScreen() {
   const { t, settings, update, notify } = useSettings();
-  const [unblocking, setUnblocking] = useState<(typeof settings.privacy.blocked)[number] | null>(null);
+  const [unblocking, setUnblocking] = useState<
+    (typeof settings.privacy.blocked)[number] | null
+  >(null);
   const blocked = settings.privacy.blocked;
   return (
-    <SettingsPage title={t("blocked.title")} description={t("blocked.description")}>
+    <SettingsPage
+      title={t("blocked.title")}
+      description={t("blocked.description")}
+    >
       {blocked.length ? (
         <Section>
           {blocked.map((person) => (
@@ -811,7 +1012,8 @@ export function BlockedScreen() {
                 <span className="set-row__text">
                   <b>{person.name}</b>
                   <small>
-                    {person.department} · {t("account.classOf", { year: person.year })}
+                    {person.department} ·{" "}
+                    {t("account.classOf", { year: person.year })}
                   </small>
                 </span>
                 <span className="set-row__trail">
@@ -828,7 +1030,11 @@ export function BlockedScreen() {
           ))}
         </Section>
       ) : (
-        <EmptyState icon="userX" title={t("blocked.empty")} description={t("blocked.empty.desc")} />
+        <EmptyState
+          icon="userX"
+          title={t("blocked.empty")}
+          description={t("blocked.empty.desc")}
+        />
       )}
       {unblocking && (
         <ConfirmSheet
@@ -840,7 +1046,9 @@ export function BlockedScreen() {
             await simulateRequest(true);
             update("privacy", (current) => ({
               ...current,
-              blocked: current.blocked.filter((person) => person.id !== unblocking.id),
+              blocked: current.blocked.filter(
+                (person) => person.id !== unblocking.id,
+              ),
             }));
             notify(t("blocked.done", { name: unblocking.name }));
             setUnblocking(null);
@@ -862,12 +1070,21 @@ const deviceIcons: Record<DeviceType, IconName> = {
 
 function TwoFactorSheet({ onClose }: { onClose: () => void }) {
   const { t, settings, update, notify } = useSettings();
-  const [method, setMethod] = useState<TwoFactorMethod>(settings.security.twoFactorMethod);
+  const [method, setMethod] = useState<TwoFactorMethod>(
+    settings.security.twoFactorMethod,
+  );
   const { busy, error, run } = useAsyncAction();
   return (
-    <Sheet title={t("security.2fa.enableTitle")} onClose={() => !busy && onClose()}>
+    <Sheet
+      title={t("security.2fa.enableTitle")}
+      onClose={() => !busy && onClose()}
+    >
       <p className="set-sheet__body">{t("security.2fa.enableBody")}</p>
-      <div className="set-group set-group--sheet" role="radiogroup" aria-label={t("security.2fa")}>
+      <div
+        className="set-group set-group--sheet"
+        role="radiogroup"
+        aria-label={t("security.2fa")}
+      >
         <RadioRow
           icon="smartphone"
           title={t("security.2fa.app")}
@@ -878,7 +1095,9 @@ function TwoFactorSheet({ onClose }: { onClose: () => void }) {
         <RadioRow
           icon="chat"
           title={t("security.2fa.sms")}
-          description={t("security.2fa.sms.desc", { phone: settings.account.phone })}
+          description={t("security.2fa.sms.desc", {
+            phone: settings.account.phone,
+          })}
           selected={method === "sms"}
           onSelect={() => setMethod("sms")}
         />
@@ -894,7 +1113,11 @@ function TwoFactorSheet({ onClose }: { onClose: () => void }) {
           onClick={async () => {
             const ok = await run(() => simulateRequest(true));
             if (!ok) return;
-            update("security", (current) => ({ ...current, twoFactor: true, twoFactorMethod: method }));
+            update("security", (current) => ({
+              ...current,
+              twoFactor: true,
+              twoFactorMethod: method,
+            }));
             notify(t("security.2fa.enabled"));
             onClose();
           }}
@@ -933,7 +1156,7 @@ function RecoverySheet({ onClose }: { onClose: () => void }) {
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          save();
+          void save();
         }}
       >
         <TextField
@@ -972,7 +1195,13 @@ function RecoverySheet({ onClose }: { onClose: () => void }) {
   );
 }
 
-type SecuritySheet = "password" | "enable2fa" | "disable2fa" | "recovery" | "logoutOthers" | Session;
+type SecuritySheet =
+  | "password"
+  | "enable2fa"
+  | "disable2fa"
+  | "recovery"
+  | "logoutOthers"
+  | Session;
 
 export function SecurityScreen() {
   const { t, settings, update, notify, locale } = useSettings();
@@ -985,17 +1214,29 @@ export function SecurityScreen() {
   const relative = (iso: string) => formatRelative(iso, locale, now.getTime());
   const loginEntries = [
     ...(current
-      ? [{ ...current, time: current.lastActive, status: "success" as const, id: "login-current" }]
+      ? [
+          {
+            ...current,
+            time: current.lastActive,
+            status: "success" as const,
+            id: "login-current",
+          },
+        ]
       : []),
     ...security.loginActivity,
   ];
   return (
-    <SettingsPage title={t("security.title")} description={t("security.description")}>
+    <SettingsPage
+      title={t("security.title")}
+      description={t("security.description")}
+    >
       <Section title={t("security.authentication")}>
         <NavRow
           icon="key"
           title={t("account.changePassword")}
-          description={t("security.passwordChanged", { time: relative(security.passwordChangedAt) })}
+          description={t("security.passwordChanged", {
+            time: relative(security.passwordChangedAt),
+          })}
           onClick={() => setSheet("password")}
         />
         <ToggleRow
@@ -1003,7 +1244,9 @@ export function SecurityScreen() {
           title={t("security.2fa")}
           description={
             security.twoFactor
-              ? t("security.2fa.on", { method: t(`security.2fa.${security.twoFactorMethod}`) })
+              ? t("security.2fa.on", {
+                  method: t(`security.2fa.${security.twoFactorMethod}`),
+                })
               : t("security.2fa.off")
           }
           checked={security.twoFactor}
@@ -1039,7 +1282,8 @@ export function SecurityScreen() {
               <span className="set-row__text">
                 <b>{current.device}</b>
                 <small>
-                  {current.location || t("security.locationUnknown")} · {t("security.activeNow")}
+                  {current.location || t("security.locationUnknown")} ·{" "}
+                  {t("security.activeNow")}
                 </small>
               </span>
               <span className="set-row__trail">
@@ -1073,7 +1317,11 @@ export function SecurityScreen() {
             </span>
           </div>
         ))}
-        {!others.length && <p className="set-row set-row--plain set-row--empty">{t("security.noSessions")}</p>}
+        {!others.length && (
+          <p className="set-row set-row--plain set-row--empty">
+            {t("security.noSessions")}
+          </p>
+        )}
       </Section>
 
       <Section title={t("security.loginActivity")}>
@@ -1084,12 +1332,17 @@ export function SecurityScreen() {
               <span className="set-row__text">
                 <b>{entry.device}</b>
                 <small>
-                  {entry.location || t("security.locationUnknown")} · {relative(entry.time)}
+                  {entry.location || t("security.locationUnknown")} ·{" "}
+                  {relative(entry.time)}
                 </small>
               </span>
               <span className="set-row__trail">
-                <span className={`set-pill ${entry.status === "blocked" ? "set-pill--danger" : ""}`}>
-                  {entry.status === "blocked" ? t("security.login.blocked") : t("security.login.success")}
+                <span
+                  className={`set-pill ${entry.status === "blocked" ? "set-pill--danger" : ""}`}
+                >
+                  {entry.status === "blocked"
+                    ? t("security.login.blocked")
+                    : t("security.login.success")}
                 </span>
               </span>
             </span>
@@ -1112,7 +1365,9 @@ export function SecurityScreen() {
           title={t("security.accountAlerts")}
           description={t("security.accountAlerts.desc")}
           checked={security.securityAlerts}
-          onChange={(securityAlerts) => update("security", (value) => ({ ...value, securityAlerts }))}
+          onChange={(securityAlerts) =>
+            update("security", (value) => ({ ...value, securityAlerts }))
+          }
         />
       </Section>
 
@@ -1142,7 +1397,8 @@ export function SecurityScreen() {
           tone="danger"
           onClose={close}
           onConfirm={async () => {
-            await simulateRequest(true);
+            const { error } = await supabase.auth.signOut({ scope: "others" });
+            if (error) throw error;
             update("security", (value) => ({
               ...value,
               sessions: value.sessions.filter((session) => session.current),
@@ -1163,7 +1419,9 @@ export function SecurityScreen() {
             await simulateRequest(true);
             update("security", (value) => ({
               ...value,
-              sessions: value.sessions.filter((session) => session.id !== sheet.id),
+              sessions: value.sessions.filter(
+                (session) => session.id !== sheet.id,
+              ),
             }));
             notify(t("security.session.done", { device: sheet.device }));
             close();

@@ -23,6 +23,57 @@ import type { AppServices, NotificationTarget } from "./network/services";
 import { useAnimatedDismiss } from "./ui/motion";
 import { LocationFilter } from "./directory/LocationFilter";
 import { matchesLocation, type LocationSelection } from "./directory/locations";
+import { useAuth } from "./backend/AuthContext";
+import {
+  getMyVerificationStatus,
+  resetPassword as backendResetPassword,
+  signIn as backendSignIn,
+  signOut as backendSignOut,
+  signUp as backendSignUp,
+  submitAlumniVerification,
+  type AlumniVerification,
+} from "./backend/auth";
+import {
+  getDepartments,
+  getProfileById,
+  listAlumniDirectory,
+  updateMyProfile,
+  type AcademicRecord,
+  type Department,
+  type Profile,
+} from "./backend/profile";
+import {
+  fetchActiveLocations,
+  getDeviceCoordinates,
+  setLocationSharing,
+  subscribeToLiveLocations,
+  type LiveLocationRecord,
+} from "./backend/location";
+import {
+  applyToOpportunity,
+  cancelEventRegistration,
+  createMentorshipRequest,
+  getEvents,
+  getMyEventRegistrations,
+  getOpportunities,
+  registerForEvent,
+  type AlumniEvent,
+  type Opportunity,
+} from "./backend/opportunities";
+import {
+  getAdminStats,
+  getPendingVerifications,
+  reviewVerification,
+  uploadVerificationProof,
+  type AdminStats,
+  type PendingVerificationItem,
+} from "./backend/admin";
+import {
+  getOrCreateDirectConversation,
+  type ChatMemberProfile,
+} from "./backend/messaging";
+import { supabase } from "./backend/supabase";
+import { CommunityFeed } from "./feed/CommunityFeed";
 import {
   Avatar,
   BrandBar,
@@ -48,7 +99,11 @@ import {
   type SocialLinksDraft,
   type SocialPlatform,
 } from "./profile/socialLinks";
-import { ProfilePreview, ProfileUnavailable, socialPlatformIcons } from "./profile/ProfilePreview";
+import {
+  ProfilePreview,
+  ProfileUnavailable,
+  socialPlatformIcons,
+} from "./profile/ProfilePreview";
 import { createTranslator, localeFor, type Translator } from "./settings/i18n";
 import {
   buildProfileShareUrl,
@@ -65,17 +120,30 @@ import {
   type SettingsSection,
   type UserSettings,
 } from "./settings/model";
-import type { ReportablePerson, SettingsRoute } from "./settings/ui";
+import type { SettingsRoute } from "./settings/ui";
 
 const MessagingInbox = lazy(() =>
-  import("./messaging/Messaging").then((module) => ({ default: module.MessagingInbox })),
+  import("./messaging/Messaging").then((module) => ({
+    default: module.MessagingInbox,
+  })),
 );
 const ConversationScreen = lazy(() =>
-  import("./messaging/Messaging").then((module) => ({ default: module.ConversationScreen })),
+  import("./messaging/Messaging").then((module) => ({
+    default: module.ConversationScreen,
+  })),
 );
 const SettingsFlow = lazy(() => import("./settings/SettingsFlow"));
 
 type Screen = "home" | "directory" | "map" | "feed" | "inbox" | "profile";
+type Screen =
+  | "home"
+  | "directory"
+  | "map"
+  | "feed"
+  | "inbox"
+  | "profile"
+  | "admin";
+type AuthView = "login" | "register";
 type Overlay =
   | "none"
   | "person"
@@ -90,9 +158,55 @@ type Overlay =
 /** Signed-out appearance fallback only; never authorizes access to the application. */
 const signedInAccount = createSampleAccount();
 const ownHeadline = "Building thoughtful tools for growing teams.";
+type DirectoryMember = Profile & { academicRecords: AcademicRecord[] };
+
+const fallbackAccount = createSampleAccount();
+const currentAlumniId: AlumniId = fallbackAccount.id;
+const defaultHeadline = "Building thoughtful tools for growing teams.";
+
+function primaryAcademicOf(records: AcademicRecord[]) {
+  return records.find((r) => r.is_current) ?? records[0] ?? null;
+}
+
+function formatDistanceKm(
+  a: { latitude: number; longitude: number } | null,
+  b: { latitude: number; longitude: number },
+): string {
+  if (!a) return "Live nearby";
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(b.latitude - a.latitude);
+  const dLon = toRad(b.longitude - a.longitude);
+  const lat1 = toRad(a.latitude);
+  const lat2 = toRad(b.latitude);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  const km = 2 * R * Math.asin(Math.sqrt(h));
+  if (km < 1) return `${Math.max(100, Math.round(km * 1000))} m`;
+  return `${km.toFixed(1)} km`;
+}
+
+function formatEventDateParts(iso: string) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return { day: "--", month: "TBD", time: "" };
+  }
+  return {
+    day: String(date.getDate()).padStart(2, "0"),
+    month: date.toLocaleString("en-IN", { month: "short" }).toUpperCase(),
+    time: date.toLocaleTimeString("en-IN", {
+      hour: "numeric",
+      minute: "2-digit",
+    }),
+  };
+}
 
 /** Adds this device as the current session; a fresh sign-in is also recorded as login activity. */
-function withCurrentSession(settings: UserSettings, recordLogin: boolean): UserSettings {
+function withCurrentSession(
+  settings: UserSettings,
+  recordLogin: boolean,
+): UserSettings {
   const session = createCurrentSession();
   const login: LoginEvent = {
     id: `login-${Date.now()}`,
@@ -106,7 +220,10 @@ function withCurrentSession(settings: UserSettings, recordLogin: boolean): UserS
     ...settings,
     security: {
       ...settings.security,
-      sessions: [session, ...settings.security.sessions.filter((item) => !item.current)],
+      sessions: [
+        session,
+        ...settings.security.sessions.filter((item) => !item.current),
+      ],
       loginActivity: recordLogin
         ? [login, ...settings.security.loginActivity].slice(0, 12)
         : settings.security.loginActivity,
@@ -210,15 +327,21 @@ const conversations = [
   { ...people[3], preview: "Could you review my portfolio?", time: "Mon", unread: 0, online: true },
 ];
 
+  typeof window !== "undefined" &&
+  Boolean(window.matchMedia?.("(prefers-color-scheme: dark)").matches);
 
 function BottomNav({
   screen,
   setScreen,
   t,
+  isAdmin,
+  unreadCount,
 }: {
   screen: Screen;
   setScreen: (s: Screen) => void;
   t: Translator;
+  isAdmin: boolean;
+  unreadCount: number;
 }) {
   const items: { key: Screen; icon: IconName; label: string }[] = [
     { key: "home", icon: "home", label: t("nav.home") },
@@ -226,6 +349,9 @@ function BottomNav({
     { key: "feed", icon: "feed", label: "Feed" },
     { key: "inbox", icon: "message", label: t("nav.inbox") },
     { key: "directory", icon: "users", label: t("nav.directory") },
+    ...(isAdmin
+      ? [{ key: "admin" as const, icon: "shield" as const, label: "Admin" }]
+      : []),
   ];
   return (
     <nav className="bottom-nav" aria-label="Primary navigation">
@@ -239,16 +365,359 @@ function BottomNav({
         >
           <span className="nav-icon">
             {item.key === "feed" ? (
-              <img className="feed-nav-logo" src={feedNavLogo} alt="" aria-hidden />
+              <img
+                className="feed-nav-logo"
+                src={feedNavLogo}
+                alt=""
+                aria-hidden
+              />
             ) : (
               <Icon name={item.icon} size={25} />
             )}
-            {item.key === "inbox" && <b>2</b>}
+            {item.key === "inbox" && unreadCount > 0 && <b>{unreadCount}</b>}
           </span>
           <small>{item.label}</small>
         </button>
       ))}
     </nav>
+  );
+}
+
+function Auth({
+  onSignedIn,
+  notice,
+}: {
+  onSignedIn: (preferAdmin: boolean) => void;
+  notice?: string | null;
+}) {
+  const [view, setView] = useState<AuthView>("login");
+  const [roleTab, setRoleTab] = useState<"Alumni" | "Admin">("Alumni");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [departmentId, setDepartmentId] = useState("");
+  const [graduationYear, setGraduationYear] = useState("2025");
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [infoMsg, setInfoMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (view !== "register") return;
+    getDepartments()
+      .then((list) => {
+        setDepartments(list);
+        if (list.length && !departmentId) setDepartmentId(list[0].id);
+      })
+      .catch(() => {
+        // Fallback options render if departments require auth under RLS.
+      });
+  }, [view, departmentId]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setErrorMsg(null);
+    setInfoMsg(null);
+    setLoading(true);
+    try {
+      if (view === "register") {
+        const fullName = `${firstName} ${lastName}`.trim();
+        const result = await backendSignUp({
+          email,
+          password,
+          fullName,
+          role: "alumni",
+          graduationYear: Number(graduationYear) || undefined,
+          departmentId: departmentId || undefined,
+        });
+        if (result.session) {
+          onSignedIn(false);
+        } else {
+          setSuccess(true);
+        }
+      } else {
+        await backendSignIn(email, password);
+        onSignedIn(roleTab === "Admin");
+      }
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : "Authentication failed. Please try again.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleForgotPassword() {
+    setErrorMsg(null);
+    setInfoMsg(null);
+    if (!email.trim()) {
+      setErrorMsg(
+        "Enter your email address first to receive a password reset link.",
+      );
+      return;
+    }
+    setLoading(true);
+    try {
+      await backendResetPassword(email);
+      setInfoMsg("Password reset link sent. Check your inbox.");
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : "Could not send password reset email.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleGoogleAuth() {
+    setErrorMsg(null);
+    setInfoMsg(null);
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin },
+    });
+    if (error) setErrorMsg(error.message);
+  }
+
+  if (success)
+    return (
+      <main className="auth-screen">
+        <div className="success-card">
+          <div className="success-icon">
+            <Icon name="check" size={30} />
+          </div>
+          <p className="eyebrow">APPLICATION RECEIVED</p>
+          <h1>Check your email to verify.</h1>
+          <p>
+            We sent a confirmation link to <b>{email.trim()}</b>. Confirm your
+            email, then sign in to access MSGI One.
+          </p>
+          <button
+            className="primary-button"
+            onClick={() => {
+              setSuccess(false);
+              setView("login");
+            }}
+          >
+            Return to sign in
+          </button>
+        </div>
+      </main>
+    );
+
+  return (
+    <main className="auth-screen">
+      <section className="auth-intro">
+        <Logo />
+        <p>
+          Where shared history becomes
+          <br />
+          professional opportunity.
+        </p>
+      </section>
+      <form className="auth-card" onSubmit={submit}>
+        {(notice || infoMsg) && (
+          <div className="success-banner auth-notice" role="status">
+            <Icon name="info" size={16} />
+            {infoMsg ?? notice}
+          </div>
+        )}
+        {errorMsg && (
+          <div className="error-banner" role="alert">
+            <Icon name="alert" size={16} />
+            {errorMsg}
+          </div>
+        )}
+        <div className="auth-card__head">
+          <p className="eyebrow">
+            {view === "login" ? "MEMBER ACCESS" : "JOIN THE NETWORK"}
+          </p>
+          <h1>
+            {view === "login" ? "Welcome back" : "Create your alumni profile"}
+          </h1>
+          <p>
+            {view === "login"
+              ? "Connect with the MSGI community, wherever your career takes you."
+              : "Use your institutional details for faster verification."}
+          </p>
+        </div>
+        {view === "login" && (
+          <div className="segmented">
+            <button
+              type="button"
+              onClick={() => setRoleTab("Alumni")}
+              className={roleTab === "Alumni" ? "active" : ""}
+            >
+              Alumni
+            </button>
+            <button
+              type="button"
+              onClick={() => setRoleTab("Admin")}
+              className={roleTab === "Admin" ? "active" : ""}
+            >
+              Admin
+            </button>
+          </div>
+        )}
+        {view === "register" && (
+          <div className="field-row">
+            <label>
+              <span>First name</span>
+              <input
+                placeholder="Aarav"
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                required
+              />
+            </label>
+            <label>
+              <span>Last name</span>
+              <input
+                placeholder="Kumar"
+                value={lastName}
+                onChange={(e) => setLastName(e.target.value)}
+                required
+              />
+            </label>
+          </div>
+        )}
+        <label className="field">
+          <span>{view === "login" ? "Email" : "Institutional email"}</span>
+          <div className="input-wrap">
+            <Icon name="mail" size={18} />
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder={
+                view === "login" ? "Enter your email" : "name@msgi.edu.in"
+              }
+              required
+            />
+          </div>
+        </label>
+        {view === "register" && (
+          <div className="field-row">
+            <label>
+              <span>Department</span>
+              <select
+                value={departmentId}
+                onChange={(e) => setDepartmentId(e.target.value)}
+              >
+                {departments.length > 0 ? (
+                  departments.map((dept) => (
+                    <option key={dept.id} value={dept.id}>
+                      {dept.name}
+                    </option>
+                  ))
+                ) : (
+                  <>
+                    <option value="">Computer Science</option>
+                    <option value="">Information Technology</option>
+                    <option value="">Mechanical Engineering</option>
+                    <option value="">Electronics & Communication</option>
+                  </>
+                )}
+              </select>
+            </label>
+            <label>
+              <span>Class of</span>
+              <select
+                value={graduationYear}
+                onChange={(e) => setGraduationYear(e.target.value)}
+              >
+                {Array.from({ length: 15 }, (_, idx) => String(2028 - idx)).map(
+                  (yr) => (
+                    <option key={yr} value={yr}>
+                      {yr}
+                    </option>
+                  ),
+                )}
+              </select>
+            </label>
+          </div>
+        )}
+        <label className="field">
+          <span>Password</span>
+          <div className="input-wrap">
+            <Icon name="lock" size={18} />
+            <input
+              type={showPassword ? "text" : "password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Enter your password"
+              minLength={6}
+              required
+            />
+            <button
+              type="button"
+              aria-label="Toggle password visibility"
+              aria-pressed={showPassword}
+              onClick={() => setShowPassword(!showPassword)}
+            >
+              <Icon name="eye" size={18} />
+            </button>
+          </div>
+        </label>
+        {view === "login" && (
+          <button
+            type="button"
+            className="text-link forgot"
+            onClick={handleForgotPassword}
+            disabled={loading}
+          >
+            Forgot password?
+          </button>
+        )}
+        <button className="primary-button" disabled={loading}>
+          {loading ? (
+            <span className="spinner" />
+          ) : view === "login" ? (
+            "Sign in securely"
+          ) : (
+            "Submit for verification"
+          )}
+          {!loading && <Icon name="arrow" size={18} />}
+        </button>
+        <div className="auth-switch">
+          <span>
+            {view === "login" ? "New to MSGI One?" : "Already a member?"}
+          </span>
+          <button
+            type="button"
+            className="text-link"
+            onClick={() => {
+              setErrorMsg(null);
+              setInfoMsg(null);
+              setView(view === "login" ? "register" : "login");
+            }}
+          >
+            {view === "login" ? "Create alumni account" : "Sign in"}
+          </button>
+        </div>
+        {view === "login" && (
+          <button
+            type="button"
+            className="google-auth-button"
+            onClick={handleGoogleAuth}
+          >
+            <span aria-hidden>G</span>
+            Continue with Google
+          </button>
+        )}
+      </form>
+      <p className="auth-support">
+        Need help? <button type="button">Contact alumni support</button>
+      </p>
+    </main>
   );
 }
 
@@ -305,20 +774,88 @@ function HomeScreen({
   onProfile,
 }: {
   navigate: (s: Screen) => void;
-  openPerson: (id: number) => void;
+  openPerson: (userId: string) => void;
   openEvents: () => void;
   profile: AvatarPerson;
   onProfile: () => void;
 }) {
-  const [rsvped, setRsvped] = useState(false);
+  const [alumni, setAlumni] = useState<DirectoryMember[]>([]);
+  const [nearbyCount, setNearbyCount] = useState(0);
+  const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
+  const [events, setEvents] = useState<AlumniEvent[]>([]);
+  const [rsvpedIds, setRsvpedIds] = useState<Set<string>>(new Set());
+  const [rsvpBusy, setRsvpBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    Promise.allSettled([
+      listAlumniDirectory(),
+      fetchActiveLocations(),
+      getOpportunities(),
+      getEvents(true),
+      getMyEventRegistrations(),
+    ]).then(([dirRes, locRes, oppRes, evRes, regRes]) => {
+      if (!active) return;
+      if (dirRes.status === "fulfilled") setAlumni(dirRes.value);
+      if (locRes.status === "fulfilled") setNearbyCount(locRes.value.length);
+      if (oppRes.status === "fulfilled") setOpportunities(oppRes.value);
+      if (evRes.status === "fulfilled") setEvents(evRes.value);
+      if (regRes.status === "fulfilled") {
+        setRsvpedIds(new Set(regRes.value.map((r) => r.event_id)));
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const firstName = profile.name.trim().split(" ")[0] || "Member";
+  const todayLabel = useMemo(
+    () =>
+      new Intl.DateTimeFormat("en-IN", {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+      })
+        .format(new Date())
+        .toUpperCase(),
+    [],
+  );
+
+  const featuredOpportunity = opportunities[0] ?? null;
+  const nextEvent = events[0] ?? null;
+  const nextEventRsvped = nextEvent ? rsvpedIds.has(nextEvent.id) : false;
+
+  async function toggleNextEventRsvp() {
+    if (!nextEvent || rsvpBusy) return;
+    setRsvpBusy(true);
+    try {
+      if (nextEventRsvped) {
+        await cancelEventRegistration(nextEvent.id);
+        setRsvpedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(nextEvent.id);
+          return next;
+        });
+      } else {
+        await registerForEvent(nextEvent.id);
+        setRsvpedIds((prev) => new Set(prev).add(nextEvent.id));
+      }
+    } catch (err) {
+      console.error("Event RSVP failed:", err);
+    } finally {
+      setRsvpBusy(false);
+    }
+  }
+
   return (
     <div className="screen">
       <div className="home-hero curved-header">
         <MainHeader person={profile} onProfile={onProfile} />
         <div className="welcome">
-          <p>THURSDAY, 14 MARCH</p>
+          <p>{todayLabel}</p>
           <h1>
-            Good morning, <em>Aarav.</em>
+            Welcome back, <em>{firstName}.</em>
           </h1>
           <span>Here’s what’s happening across your network.</span>
         </div>
@@ -328,7 +865,7 @@ function HomeScreen({
               <Icon name="compass" size={18} />
             </span>
             <div>
-              <strong>18</strong>
+              <strong>{nearbyCount}</strong>
               <small>nearby alumni</small>
             </div>
             <Icon name="chevron" size={16} />
@@ -338,8 +875,8 @@ function HomeScreen({
               <Icon name="briefcase" size={18} />
             </span>
             <div>
-              <strong>12</strong>
-              <small>new opportunities</small>
+              <strong>{opportunities.length}</strong>
+              <small>live opportunities</small>
             </div>
             <Icon name="chevron" size={16} />
           </button>
@@ -352,84 +889,282 @@ function HomeScreen({
             action="Explore"
             onClick={() => navigate("directory")}
           />
-          <div className="people-scroll">
-            {people.map((person, i) => (
-              <button className="person-mini" key={person.id} onClick={() => openPerson(person.id)}>
+          {alumni.length > 0 ? (
+            <div className="people-scroll">
+              {alumni.slice(0, 8).map((person) => (
+                <button
+                  className="person-mini"
+                  key={person.user_id}
+                  onClick={() => openPerson(person.user_id)}
+                >
+                  <div>
+                    <Avatar
+                      person={{
+                        name: person.full_name,
+                        role: person.job_title ?? person.role,
+                        image: person.avatar_url ?? undefined,
+                      }}
+                      size="lg"
+                    />
+                    {person.is_verified && (
+                      <span className="verify-dot">
+                        <Icon name="check" size={10} />
+                      </span>
+                    )}
+                  </div>
+                  <strong>{person.full_name.split(" ")[0]}</strong>
+                  <small>{person.company || person.city || "MSGI"}</small>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p>Active alumni profiles will appear here as members join.</p>
+          )}
+        </GlassPanel>
+
+        <GlassPanel className="home-section">
+          <SectionHead
+            title="For your next move"
+            action="View all"
+            onClick={openEvents}
+          />
+          {featuredOpportunity ? (
+            <article className="feature-opportunity">
+              <div className="feature-top">
+                <span className="company-tile">
+                  {(
+                    featuredOpportunity.company_name ||
+                    featuredOpportunity.title
+                  )
+                    .charAt(0)
+                    .toUpperCase()}
+                </span>
                 <div>
-                  <Avatar person={person} size="lg" online={i < 2} />
-                  <span className="verify-dot">
-                    <Icon name="check" size={10} />
+                  <p className="eyebrow">
+                    {featuredOpportunity.opportunity_type.toUpperCase()} ·{" "}
+                    {(
+                      featuredOpportunity.company_name || "MSGI NETWORK"
+                    ).toUpperCase()}
+                  </p>
+                  <h3>{featuredOpportunity.title}</h3>
+                  <span>
+                    {[
+                      featuredOpportunity.location,
+                      featuredOpportunity.work_mode,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ") || "Open opportunity"}
                   </span>
                 </div>
-                <strong>{person.name.split(" ")[0]}</strong>
-                <small>{person.company}</small>
-              </button>
-            ))}
-          </div>
-        </GlassPanel>
-        <GlassPanel className="home-section">
-          <SectionHead title="For your next move" action="View all" onClick={openEvents} />
-          <article className="feature-opportunity">
-            <div className="feature-top">
-              <span className="company-tile">Z</span>
-              <div>
-                <p className="eyebrow">ALUMNI REFERRAL · ZOHO</p>
-                <h3>Senior Product Engineer</h3>
-                <span>Chennai · Hybrid · Posted by Priya</span>
               </div>
-            </div>
-            <p>
-              Build products used by millions. Alumni applications are reviewed on priority until
-              Friday.
-            </p>
-            <div className="card-actions">
-              <div className="avatar-stack">
-                {people.slice(0, 3).map((p) => (
-                  <Avatar key={p.id} person={p} size="sm" />
-                ))}
-                <small>6 alumni work here</small>
-              </div>
-              <button onClick={openEvents}>
-                View role <Icon name="arrow" size={15} />
-              </button>
-            </div>
-          </article>
-        </GlassPanel>
-        <hr className="home-section-divider" />
-        <GlassPanel className="home-section home-coming-up">
-          <SectionHead title="Coming up" action="Calendar" onClick={openEvents} />
-          <article className="event-card">
-            <div className="date-block">
-              <strong>28</strong>
-              <span>MAR</span>
-            </div>
-            <div className="event-info">
-              <p className="eyebrow">CHENNAI CHAPTER</p>
-              <h3>Leaders’ Table: Building for scale</h3>
-              <span>
-                <Icon name="pin" size={14} /> The Leela Palace · 6:30 PM
-              </span>
-              <div>
-                <b>42 attending</b>
-                <button className={rsvped ? "rsvped" : ""} onClick={() => setRsvped(!rsvped)}>
-                  {rsvped ? "Going" : "RSVP"}
-                  {rsvped && <Icon name="check" size={14} />}
+              <p>{featuredOpportunity.description}</p>
+              <div className="card-actions">
+                <small>{opportunities.length} open roles in network</small>
+                <button onClick={openEvents}>
+                  View role <Icon name="arrow" size={15} />
                 </button>
               </div>
-            </div>
-          </article>
+            </article>
+          ) : (
+            <p>No published opportunities yet. Check back soon.</p>
+          )}
         </GlassPanel>
-        <button className="announcement" onClick={openEvents}>
-          <span>
-            <Icon name="spark" />
-          </span>
-          <div>
-            <p className="eyebrow">FROM MSGI</p>
-            <strong>Distinguished Alumni Awards 2025</strong>
-            <small>Nominations close 30 March</small>
+
+        <hr className="home-section-divider" />
+        <GlassPanel className="home-section home-coming-up">
+          <SectionHead
+            title="Coming up"
+            action="Calendar"
+            onClick={openEvents}
+          />
+          {nextEvent ? (
+            (() => {
+              const parts = formatEventDateParts(nextEvent.start_time);
+              return (
+                <article className="event-card">
+                  <div className="date-block">
+                    <strong>{parts.day}</strong>
+                    <span>{parts.month}</span>
+                  </div>
+                  <div className="event-info">
+                    <p className="eyebrow">
+                      {(nextEvent.event_type || "ALUMNI EVENT").toUpperCase()}
+                    </p>
+                    <h3>{nextEvent.title}</h3>
+                    <span>
+                      <Icon name="pin" size={14} />{" "}
+                      {nextEvent.is_online
+                        ? "Online"
+                        : nextEvent.venue || "MSGI Campus"}
+                      {parts.time ? ` · ${parts.time}` : ""}
+                    </span>
+                    <div>
+                      <b>
+                        {nextEventRsvped
+                          ? "You’re registered"
+                          : "Open for RSVP"}
+                      </b>
+                      <button
+                        className={nextEventRsvped ? "rsvped" : ""}
+                        disabled={rsvpBusy}
+                        onClick={() => void toggleNextEventRsvp()}
+                      >
+                        {nextEventRsvped ? "Going" : "RSVP"}
+                        {nextEventRsvped && <Icon name="check" size={14} />}
+                      </button>
+                    </div>
+                  </div>
+                </article>
+              );
+            })()
+          ) : (
+            <p>No upcoming events scheduled yet.</p>
+          )}
+        </GlassPanel>
+      </div>
+    </div>
+  );
+}
+
+function AdminScreen({
+  profile,
+  onProfile,
+}: {
+  profile: AvatarPerson;
+  onProfile: () => void;
+}) {
+  const [stats, setStats] = useState<AdminStats | null>(null);
+  const [pending, setPending] = useState<PendingVerificationItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const loadAdminData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [statsData, pendingData] = await Promise.all([
+        getAdminStats(),
+        getPendingVerifications(),
+      ]);
+      setStats(statsData);
+      setPending(pendingData);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to load admin console.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAdminData();
+  }, [loadAdminData]);
+
+  async function handleReview(id: string, decision: "approved" | "rejected") {
+    setBusyId(id);
+    setError(null);
+    try {
+      await reviewVerification(id, decision);
+      await loadAdminData();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not update verification.",
+      );
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <div className="screen">
+      <MainSectionHeader
+        profile={profile}
+        onProfile={onProfile}
+        title="Admin console"
+      />
+      <div className="content">
+        {error && (
+          <div className="error-banner" role="alert">
+            <Icon name="alert" size={16} />
+            {error}
           </div>
-          <Icon name="chevron" />
-        </button>
+        )}
+        <GlassPanel className="profile-section">
+          <p className="eyebrow">NETWORK OVERVIEW</p>
+          <h2>Live platform metrics</h2>
+          {loading && !stats ? (
+            <p>Loading metrics…</p>
+          ) : (
+            <div className="detail-grid">
+              <span>
+                <small>Total members</small>
+                <b>{stats?.totalUsers ?? 0}</b>
+              </span>
+              <span>
+                <small>Verified alumni</small>
+                <b>{stats?.verifiedAlumni ?? 0}</b>
+              </span>
+              <span>
+                <small>Pending reviews</small>
+                <b>{stats?.pendingVerifications ?? 0}</b>
+              </span>
+              <span>
+                <small>Live posts</small>
+                <b>{stats?.publishedPosts ?? 0}</b>
+              </span>
+            </div>
+          )}
+        </GlassPanel>
+
+        <GlassPanel className="profile-section">
+          <p className="eyebrow">VERIFICATION QUEUE</p>
+          <h2>Pending alumni requests ({pending.length})</h2>
+          {!loading && pending.length === 0 ? (
+            <p>All verification requests have been reviewed.</p>
+          ) : (
+            <div className="directory-list">
+              {pending.map((item) => (
+                <article className="alumni-card" key={item.id}>
+                  <div className="alumni-main">
+                    <Avatar
+                      person={{
+                        name: item.applicant?.full_name || "Alumni applicant",
+                        image: item.applicant?.avatar_url ?? undefined,
+                      }}
+                      size="md"
+                    />
+                    <div>
+                      <h3>{item.applicant?.full_name || "Unnamed member"}</h3>
+                      <p>
+                        {item.institution_email ||
+                          "No institutional email provided"}
+                      </p>
+                      <small>Class of {item.graduation_year ?? "—"}</small>
+                    </div>
+                  </div>
+                  <div className="alumni-actions">
+                    <button
+                      type="button"
+                      disabled={busyId === item.id}
+                      onClick={() => handleReview(item.id, "rejected")}
+                    >
+                      <Icon name="close" size={15} /> Reject
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busyId === item.id}
+                      onClick={() => handleReview(item.id, "approved")}
+                    >
+                      <Icon name="check" size={15} /> Approve
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </GlassPanel>
       </div>
     </div>
   );
@@ -440,10 +1175,14 @@ function DirectoryScreen({
   profile,
   onProfile,
 }: {
-  openPerson: (id: number) => void;
+  openPerson: (userId: string) => void;
   profile: AvatarPerson;
   onProfile: () => void;
 }) {
+  const [members, setMembers] = useState<DirectoryMember[]>([]);
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
   const filterPanel = useRef<HTMLElement>(null);
@@ -466,7 +1205,76 @@ function DirectoryScreen({
           (!institution || ("institution" in p && p.institution === institution)),
       ),
     [query, filter, graduationYear, institution, location],
+  const [quickChip, setQuickChip] = useState("All");
+  const [selectedDeptId, setSelectedDeptId] = useState("");
+  const [selectedCity, setSelectedCity] = useState("");
+  const [selectedYear, setSelectedYear] = useState("");
+  const [verifiedOnly, setVerifiedOnly] = useState(false);
+
+  useEffect(() => {
+    getDepartments()
+      .then(setDepartments)
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const timer = window.setTimeout(async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const list = await listAlumniDirectory({
+          search: query.trim() || undefined,
+          city: selectedCity || undefined,
+          departmentId: selectedDeptId || undefined,
+          graduationYear: selectedYear ? Number(selectedYear) : undefined,
+        });
+        if (active) setMembers(list);
+      } catch (err) {
+        if (active) {
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Failed to load alumni directory.",
+          );
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }, 200);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [query, selectedCity, selectedDeptId, selectedYear]);
+
+  const availableCities = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          members
+            .map((m) => m.city?.trim())
+            .filter((c): c is string => Boolean(c)),
+        ),
+      ).sort(),
+    [members],
   );
+
+  const filtered = useMemo(
+    () =>
+      members.filter((m) => {
+        if (verifiedOnly && !m.is_verified) return false;
+        if (quickChip === "All") return true;
+        if (quickChip === "Verified") return m.is_verified;
+        const primary = primaryAcademicOf(m.academicRecords);
+        const haystack =
+          `${m.city ?? ""} ${primary?.department?.name ?? ""} ${m.company ?? ""}`.toLowerCase();
+        return haystack.includes(quickChip.toLowerCase());
+      }),
+    [members, quickChip, verifiedOnly],
+  );
+
   return (
     <div className="screen">
       <MainSectionHeader
@@ -490,7 +1298,7 @@ function DirectoryScreen({
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Name, company, city or department"
+              placeholder="Name, company, city or role"
             />
             {query && (
               <button onClick={() => setQuery("")} aria-label="Clear search">
@@ -499,56 +1307,104 @@ function DirectoryScreen({
             )}
           </div>
           <div className="chips">
-            {["All", "Chennai", "Bengaluru", "Computer"].map((c) => (
-              <button onClick={() => setFilter(c)} className={filter === c ? "active" : ""} key={c}>
-                {c}
-              </button>
-            ))}
+            {["All", "Verified", "Chennai", "Bengaluru", "Computer"].map(
+              (c) => (
+                <button
+                  onClick={() => setQuickChip(c)}
+                  className={quickChip === c ? "active" : ""}
+                  key={c}
+                >
+                  {c}
+                </button>
+              ),
+            )}
           </div>
         </GlassPanel>
+
+        {error && (
+          <div className="error-banner" role="alert">
+            <Icon name="alert" size={16} />
+            {error}
+          </div>
+        )}
+
         <div className="result-summary">
           <span>
             <b>{filtered.length}</b> alumni found
           </span>
-          <span>Verified members only</span>
+          <span>
+            {loading
+              ? "Syncing…"
+              : verifiedOnly
+                ? "Verified only"
+                : "Active members"}
+          </span>
         </div>
+
         <div className="directory-list">
-          {filtered.map((person) => (
-            <article className="alumni-card" key={person.id}>
-              <button className="alumni-main" onClick={() => openPerson(person.id)}>
-                <Avatar person={person} size="lg" />
-                <div>
-                  <div className="name-line">
-                    <h3>{person.name}</h3>
-                    <span title="Verified">
-                      <Icon name="check" size={11} />
-                    </span>
+          {filtered.map((person) => {
+            const academic = primaryAcademicOf(person.academicRecords);
+            const deptName = academic?.department?.name || "MSGI Alumni";
+            const gradYear = academic?.graduation_year;
+            return (
+              <article className="alumni-card" key={person.user_id}>
+                <button
+                  className="alumni-main"
+                  onClick={() => openPerson(person.user_id)}
+                >
+                  <Avatar
+                    person={{
+                      name: person.full_name,
+                      role: person.job_title ?? person.role,
+                      image: person.avatar_url ?? undefined,
+                    }}
+                    size="lg"
+                  />
+                  <div>
+                    <div className="name-line">
+                      <h3>{person.full_name}</h3>
+                      {person.is_verified && (
+                        <span title="Verified">
+                          <Icon name="check" size={11} />
+                        </span>
+                      )}
+                    </div>
+                    <p>
+                      {person.job_title || person.role}
+                      {person.company ? (
+                        <>
+                          {" "}
+                          at <b>{person.company}</b>
+                        </>
+                      ) : null}
+                    </p>
+                    <small>
+                      {deptName}
+                      {gradYear ? ` · Class of ${gradYear}` : ""}
+                    </small>
+                    {person.city && (
+                      <small>
+                        <Icon name="pin" size={13} />
+                        {person.city}
+                      </small>
+                    )}
                   </div>
-                  <p>
-                    {person.role} at <b>{person.company}</b>
-                  </p>
-                  <small>
-                    {person.dept} · Class of {person.year}
-                  </small>
-                  <small>
-                    <Icon name="pin" size={13} />
-                    {person.city}
-                  </small>
-                </div>
-                <Icon name="chevron" className="muted" />
-              </button>
-              <div className="alumni-actions">
-                <span>
-                  {person.distance !== "—" ? `${person.distance} away` : "Location shared"}
-                </span>
-                <button onClick={() => openPerson(person.id)}>
-                  <Icon name="message" size={16} /> Message
+                  <Icon name="chevron" className="muted" />
                 </button>
-              </div>
-            </article>
-          ))}
+                <div className="alumni-actions">
+                  <span>
+                    {person.is_verified ? "Verified member" : "Active member"}
+                  </span>
+                  <button onClick={() => openPerson(person.user_id)}>
+                    <Icon name="message" size={16} /> View & Message
+                  </button>
+                </div>
+              </article>
+            );
+          })}
         </div>
-        {!filtered.length && (
+
+        {!loading && !filtered.length && (
           <div className="empty-state">
             <div>
               <Icon name="search" />
@@ -565,10 +1421,23 @@ function DirectoryScreen({
               }}
             >
               Clear search and filters
+            <p>Try a different name, company, department, or city.</p>
+            <button
+              onClick={() => {
+                setQuery("");
+                setQuickChip("All");
+                setSelectedDeptId("");
+                setSelectedCity("");
+                setSelectedYear("");
+                setVerifiedOnly(false);
+              }}
+            >
+              Clear filters
             </button>
           </div>
         )}
       </div>
+
       {filterOpen && (
         <div className="sheet-backdrop" onClick={closeFilter}>
           <section
@@ -586,6 +1455,10 @@ function DirectoryScreen({
                 <h2>Directory filters</h2>
               </div>
               <button onClick={closeFilter} aria-label="Close filters">
+              <button
+                onClick={() => setFilterOpen(false)}
+                aria-label="Close filters"
+              >
                 <Icon name="close" />
               </button>
             </div>
@@ -612,25 +1485,64 @@ function DirectoryScreen({
                     {name}
                   </option>
                 ))}
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(e.target.value)}
+              >
+                <option value="">All years</option>
+                {Array.from({ length: 18 }, (_, idx) => String(2028 - idx)).map(
+                  (yr) => (
+                    <option key={yr} value={yr}>
+                      {yr}
+                    </option>
+                  ),
+                )}
               </select>
             </label>
             <label>
               Department
-              <select>
-                <option>All departments</option>
-                <option>Computer Science</option>
-                <option>Information Technology</option>
+              <select
+                value={selectedDeptId}
+                onChange={(e) => setSelectedDeptId(e.target.value)}
+              >
+                <option value="">All departments</option>
+                {departments.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
               </select>
             </label>
             <LocationFilter value={location} onChange={setLocation} />
+            <label>
+              City
+              <select
+                value={selectedCity}
+                onChange={(e) => setSelectedCity(e.target.value)}
+              >
+                <option value="">Any city</option>
+                {availableCities.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label className="check-row">
               <span>
                 <Icon name="shield" />
                 Verified alumni only
               </span>
-              <input type="checkbox" defaultChecked />
+              <input
+                type="checkbox"
+                checked={verifiedOnly}
+                onChange={(e) => setVerifiedOnly(e.target.checked)}
+              />
             </label>
             <button className="primary-button" onClick={closeFilter}>
+            <button
+              className="primary-button"
+              onClick={() => setFilterOpen(false)}
+            >
               Show {filtered.length} alumni
             </button>
           </section>
@@ -644,12 +1556,97 @@ function MapScreen({
   openPerson,
   profile,
   onProfile,
+  isVerified,
+  locationVisible,
+  onToggleLocation,
 }: {
-  openPerson: (id: number) => void;
+  openPerson: (userId: string) => void;
   profile: AvatarPerson;
   onProfile: () => void;
+  isVerified: boolean;
+  locationVisible: boolean;
+  onToggleLocation: (next: boolean) => Promise<void>;
 }) {
-  const [selected, setSelected] = useState(people[0]);
+  const [locations, setLocations] = useState<LiveLocationRecord[]>([]);
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [myCoords, setMyCoords] = useState<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [locating, setLocating] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+
+  const loadLocations = useCallback(async () => {
+    try {
+      const list = await fetchActiveLocations();
+      setLocations(list);
+      setSelectedUserId((prev) =>
+        prev && list.some((l) => l.user_id === prev)
+          ? prev
+          : (list[0]?.user_id ?? null),
+      );
+    } catch (err) {
+      setStatusMsg(
+        err instanceof Error
+          ? err.message
+          : "Could not load live alumni locations.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadLocations();
+    const unsubscribe = subscribeToLiveLocations(() => {
+      void loadLocations();
+    });
+    return unsubscribe;
+  }, [loadLocations]);
+
+  const visibleLocations = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return locations;
+    return locations.filter((loc) =>
+      `${loc.profile?.full_name ?? ""} ${loc.profile?.city ?? ""} ${loc.profile?.company ?? ""} ${loc.location_label ?? ""}`
+        .toLowerCase()
+        .includes(term),
+    );
+  }, [locations, search]);
+
+  const selected =
+    visibleLocations.find((l) => l.user_id === selectedUserId) ??
+    visibleLocations[0] ??
+    null;
+
+  async function handleLocateMe() {
+    setLocating(true);
+    setStatusMsg(null);
+    try {
+      const coords = await getDeviceCoordinates();
+      setMyCoords(coords);
+      if (isVerified) {
+        await onToggleLocation(true);
+        await loadLocations();
+        setStatusMsg(
+          "Your live location is updated and visible to verified alumni.",
+        );
+      } else {
+        setStatusMsg(
+          "GPS found. Complete alumni verification to broadcast your live pin.",
+        );
+      }
+    } catch (err) {
+      setStatusMsg(
+        err instanceof Error ? err.message : "Unable to read GPS location.",
+      );
+    } finally {
+      setLocating(false);
+    }
+  }
+
   return (
     <div className="screen map-screen">
       <div className="map-canvas">
@@ -662,60 +1659,126 @@ function MapScreen({
           <MainHeader person={profile} onProfile={onProfile} />
           <div className="map-title-row">
             <h1>Alumni map</h1>
-            <button className="icon-button">
-              <Icon name="sliders" />
+            <button
+              className="icon-button"
+              aria-label={
+                locationVisible ? "Pause location sharing" : "Share my location"
+              }
+              onClick={() => void onToggleLocation(!locationVisible)}
+            >
+              <Icon name={locationVisible ? "eye" : "eyeOff"} />
             </button>
           </div>
         </div>
         <div className="map-search search-box">
           <Icon name="search" />
-          <input placeholder="Search a city or area" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search a city, company, or alumnus"
+          />
         </div>
         <span className="area-label area-one">T. NAGAR</span>
         <span className="area-label area-two">ADYAR</span>
         <span className="area-label area-three">GUINDY</span>
-        {people.slice(0, 3).map((p, i) => (
-          <button
-            key={p.id}
-            onClick={() => setSelected(p)}
-            aria-label={`Show ${p.name} on map`}
-            aria-pressed={selected.id === p.id}
-            className={`map-marker marker-${i + 1} ${selected.id === p.id ? "active" : ""}`}
-          >
-            <Avatar person={p} size="sm" />
-            <span>{i === 1 ? "4" : ""}</span>
-          </button>
-        ))}
-        <button className="locate-button">
+
+        {visibleLocations.map((loc, i) => {
+          const leftPct = 20 + ((i * 23) % 60);
+          const topPct = 34 + ((i * 11) % 24);
+          return (
+            <button
+              key={loc.user_id}
+              onClick={() => setSelectedUserId(loc.user_id)}
+              aria-label={`Show ${loc.profile?.full_name ?? "Alumnus"} on map`}
+              aria-pressed={selected?.user_id === loc.user_id}
+              style={{ left: `${leftPct}%`, top: `${topPct}%` }}
+              className={`map-marker ${selected?.user_id === loc.user_id ? "active" : ""}`}
+            >
+              <Avatar
+                person={{
+                  name: loc.profile?.full_name || "Alumni",
+                  image: loc.profile?.avatar_url ?? undefined,
+                }}
+                size="sm"
+              />
+            </button>
+          );
+        })}
+
+        <button
+          className="locate-button"
+          onClick={() => void handleLocateMe()}
+          disabled={locating}
+          aria-label="Update my live location"
+        >
           <Icon name="compass" />
         </button>
+
         <div className="privacy-note">
           <Icon name="shield" size={15} />
-          Only alumni who share their location appear here
+          {statusMsg ??
+            (isVerified
+              ? `${visibleLocations.length} verified alumni sharing live location`
+              : "Only verified alumni can view and share live locations")}
         </div>
-        <article className="map-preview">
-          <div className="map-preview__top">
-            <Avatar person={selected} size="lg" online />
-            <div>
-              <VerifyBadge />
-              <h3>{selected.name}</h3>
-              <p>
-                {selected.role} · {selected.company}
-              </p>
-              <small>
-                <Icon name="pin" size={13} />
-                {selected.city} · {selected.distance}
-              </small>
+
+        {selected ? (
+          <article className="map-preview">
+            <div className="map-preview__top">
+              <Avatar
+                person={{
+                  name: selected.profile?.full_name || "Verified Alumni",
+                  image: selected.profile?.avatar_url ?? undefined,
+                }}
+                size="lg"
+                online
+              />
+              <div>
+                {selected.profile?.is_verified && <VerifyBadge />}
+                <h3>{selected.profile?.full_name || "Verified Alumni"}</h3>
+                <p>
+                  {[selected.profile?.headline, selected.profile?.company]
+                    .filter(Boolean)
+                    .join(" · ") || "MSGI Alumni"}
+                </p>
+                <small>
+                  <Icon name="pin" size={13} />
+                  {selected.location_label ||
+                    selected.profile?.city ||
+                    "Nearby"}{" "}
+                  · {formatDistanceKm(myCoords, selected)}
+                </small>
+              </div>
             </div>
-          </div>
-          <div>
-            <button onClick={() => openPerson(selected.id)}>View profile</button>
-            <button className="navy" onClick={() => openPerson(selected.id)}>
-              <Icon name="message" size={16} />
-              Message
-            </button>
-          </div>
-        </article>
+            <div>
+              <button onClick={() => openPerson(selected.user_id)}>
+                View profile
+              </button>
+              <button
+                className="navy"
+                onClick={() => openPerson(selected.user_id)}
+              >
+                <Icon name="message" size={16} />
+                Message
+              </button>
+            </div>
+          </article>
+        ) : (
+          <article className="map-preview">
+            <div className="map-preview__top">
+              <div>
+                <h3>
+                  {loading ? "Loading live map…" : "No active alumni pins yet"}
+                </h3>
+                <p>
+                  {isVerified
+                    ? "Tap the compass button to share your live location."
+                    : "Verify your alumni profile to view and join the live proximity map."}
+                </p>
+              </div>
+            </div>
+          </article>
+        )}
       </div>
     </div>
   );
@@ -723,37 +1786,41 @@ function MapScreen({
 
 function InboxScreen({
   openChat,
-  store,
   profile,
   onProfile,
+  onUnreadChange,
 }: {
-  openChat: (id: number) => void;
-  store: MessagingStore;
+  openChat: (
+    conversationId: string,
+    partner?: ChatMemberProfile | null,
+    title?: string | null,
+  ) => void;
   profile: AvatarPerson;
   onProfile: () => void;
+  onUnreadChange: (count: number) => void;
 }) {
   return (
     <Suspense
       fallback={
-        <div
-          className="screen flex items-center justify-center"
-          role="status"
-          aria-label="Loading inbox"
-        >
+        <div className="screen flex items-center justify-center" role="status">
           Loading inbox…
         </div>
       }
     >
       <MessagingInbox
-        store={store}
         openChat={openChat}
+        onUnreadChange={onUnreadChange}
         renderHeader={(_compose, search) => (
           <MainSectionHeader
             profile={profile}
             onProfile={onProfile}
             title="Inbox"
             action={
-              <button className="icon-button" aria-label="Search conversations" onClick={search}>
+              <button
+                className="icon-button"
+                aria-label="Search conversations"
+                onClick={search}
+              >
                 <Icon name="search" />
               </button>
             }
@@ -765,32 +1832,31 @@ function InboxScreen({
 }
 
 function ChatScreen({
-  id,
+  conversationId,
+  partner,
+  title,
   onBack,
   viewProfile,
-  store,
 }: {
-  id: number;
+  conversationId: string;
+  partner?: ChatMemberProfile | null;
+  title?: string | null;
   onBack: () => void;
-  viewProfile: () => void;
-  store: MessagingStore;
+  viewProfile: (userId: string) => void;
 }) {
   return (
     <Suspense
       fallback={
-        <div
-          className="screen flex items-center justify-center"
-          role="status"
-          aria-label="Loading conversation"
-        >
+        <div className="screen flex items-center justify-center" role="status">
           Loading conversation…
         </div>
       }
     >
       <ConversationScreen
-        key={id}
-        id={id}
-        store={store}
+        key={conversationId}
+        conversationId={conversationId}
+        partner={partner}
+        title={title}
         onBack={onBack}
         viewProfile={viewProfile}
       />
@@ -800,24 +1866,92 @@ function ChatScreen({
 
 function ProfileScreen({
   account,
+  headline,
+  bio,
+  linkedinUrl,
   locationVisible,
-  setLocationVisible,
+  locationBusy,
+  locationError,
+  onToggleLocation,
   openSettings,
   edit,
+  isAdmin,
+  openAdmin,
 }: {
   account: UserSettings["account"];
+  headline: string;
+  bio: string;
+  linkedinUrl?: string | null;
   locationVisible: boolean;
-  setLocationVisible: (visible: boolean) => void;
+  locationBusy: boolean;
+  locationError: string | null;
+  onToggleLocation: (visible: boolean) => Promise<void>;
   openSettings: (route: SettingsRoute) => void;
   edit: () => void;
+  isAdmin: boolean;
+  openAdmin: () => void;
 }) {
-  const person = { name: account.fullName, role: account.role, image: account.avatar };
+  const person = {
+    name: account.fullName,
+    role: account.role,
+    image: account.avatar,
+  };
+  const [verification, setVerification] = useState<AlumniVerification | null>(
+    null,
+  );
+  const [instEmail, setInstEmail] = useState(account.email);
+  const [gradYear, setGradYear] = useState(account.graduationYear || "2024");
+  const [proofFile, setProofFile] = useState<File | null>(null);
+  const [submittingVerif, setSubmittingVerif] = useState(false);
+  const [verifMsg, setVerifMsg] = useState<string | null>(null);
+  const [verifErr, setVerifErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (account.verified) return;
+    getMyVerificationStatus()
+      .then(setVerification)
+      .catch(() => {});
+  }, [account.verified]);
+
+  async function handleVerificationSubmit(e: FormEvent) {
+    e.preventDefault();
+    setSubmittingVerif(true);
+    setVerifErr(null);
+    setVerifMsg(null);
+    try {
+      let proofPath: string | undefined;
+      if (proofFile) {
+        proofPath = await uploadVerificationProof(proofFile);
+      }
+      const created = await submitAlumniVerification({
+        institutionEmail: instEmail,
+        graduationYear: Number(gradYear) || undefined,
+        proofPath,
+      });
+      setVerification(created);
+      setProofFile(null);
+      setVerifMsg("Verification request submitted for admin review.");
+    } catch (err) {
+      setVerifErr(
+        err instanceof Error
+          ? err.message
+          : "Could not submit verification request.",
+      );
+    } finally {
+      setSubmittingVerif(false);
+    }
+  }
+
   return (
     <div className="screen profile-screen">
       <div className="profile-hero">
         <BrandBar
           action={
-            <button className="icon-button" onClick={edit} aria-label="Edit profile details">
+            <button
+              className="icon-button"
+              onClick={edit}
+              aria-label="Edit profile details"
+            >
               <Icon name="edit" />
             </button>
           }
@@ -828,51 +1962,126 @@ function ProfileScreen({
             {account.verified && <VerifyBadge />}
             <h1>{account.fullName}</h1>
             <p>
-              {account.role} at {account.company}
+              {account.role}
+              {account.company ? ` at ${account.company}` : ""}
             </p>
             <span>
-              {account.department} · Class of {account.graduationYear}
+              {account.department}
+              {account.graduationYear
+                ? ` · Class of ${account.graduationYear}`
+                : ""}
             </span>
           </div>
         </div>
       </div>
       <div className="content profile-content">
+        <div className="profile-actions glass-panel">
+          <button onClick={edit}>
+            <FrostedIcon name="edit" />
+            Edit profile
+          </button>
+          <button
+            onClick={() => {
+              if (linkedinUrl)
+                window.open(linkedinUrl, "_blank", "noopener,noreferrer");
+              else edit();
+            }}
+          >
+            <FrostedIcon name="linkedin" />
+            LinkedIn
+          </button>
+          <button onClick={() => openSettings("main")}>
+            <FrostedIcon name="settings" />
+            Settings
+          </button>
+        </div>
+
         <GlassPanel className="profile-section">
           <p className="eyebrow">PROFESSIONAL IDENTITY</p>
-          <h2>{ownHeadline}</h2>
+          <h2>{headline}</h2>
+          {bio && <p>{bio}</p>}
           <div className="detail-grid">
             <span>
               <small>Current role</small>
-              <b>{account.role}</b>
+              <b>{account.role || "—"}</b>
             </span>
             <span>
               <small>Company</small>
-              <b>{account.company}</b>
+              <b>{account.company || "—"}</b>
             </span>
             <span>
               <small>Location</small>
-              <b>{account.city}, India</b>
+              <b>{account.city ? `${account.city}, India` : "Not set"}</b>
             </span>
             <span>
-              <small>Experience</small>
-              <b>5 years</b>
+              <small>Status</small>
+              <b>
+                {account.verified ? "Verified alumni" : "Pending verification"}
+              </b>
             </span>
           </div>
         </GlassPanel>
-        <GlassPanel className="profile-section">
-          <div className="section-head">
-            <div>
-              <p className="eyebrow">EXPERTISE</p>
-              <h2>Skills & interests</h2>
-            </div>
-          </div>
-          <div className="skill-list">
-            <span>Product strategy</span>
-            <span>Design systems</span>
-            <span>Mentorship</span>
-            <span>B2B SaaS</span>
-          </div>
-        </GlassPanel>
+
+        {!account.verified && (
+          <GlassPanel className="profile-section">
+            <p className="eyebrow">ALUMNI VERIFICATION</p>
+            <h2>Verify your MSGI membership</h2>
+            {verifMsg && (
+              <div className="success-banner" role="status">
+                <Icon name="check" size={16} />
+                {verifMsg}
+              </div>
+            )}
+            {verifErr && (
+              <div className="error-banner" role="alert">
+                <Icon name="alert" size={16} />
+                {verifErr}
+              </div>
+            )}
+            {verification?.status === "pending" ? (
+              <p>
+                Your verification request (Class of{" "}
+                {verification.graduation_year ?? "—"}) is currently{" "}
+                <b>pending admin review</b>.
+              </p>
+            ) : (
+              <form className="edit-form" onSubmit={handleVerificationSubmit}>
+                <label className="field">
+                  <span>Institutional email</span>
+                  <input
+                    type="email"
+                    value={instEmail}
+                    onChange={(e) => setInstEmail(e.target.value)}
+                    required
+                  />
+                </label>
+                <label className="field">
+                  <span>Graduation year</span>
+                  <input
+                    type="number"
+                    min={1990}
+                    max={2035}
+                    value={gradYear}
+                    onChange={(e) => setGradYear(e.target.value)}
+                    required
+                  />
+                </label>
+                <label className="field">
+                  <span>Alumni ID / Degree proof (optional image or PDF)</span>
+                  <input
+                    type="file"
+                    accept="image/*,.pdf"
+                    onChange={(e) => setProofFile(e.target.files?.[0] ?? null)}
+                  />
+                </label>
+                <button className="primary-button" disabled={submittingVerif}>
+                  {submittingVerif ? "Submitting…" : "Submit for verification"}
+                </button>
+              </form>
+            )}
+          </GlassPanel>
+        )}
+
         <section className="privacy-card">
           <div className="privacy-card__icon">
             <Icon name="shield" />
@@ -881,12 +2090,16 @@ function ProfileScreen({
             <p className="eyebrow">PRIVACY CONTROL</p>
             <h3>Location visibility</h3>
             <p>
-              Show your city and approximate distance to verified alumni. Your precise location is
-              never shared.
+              Show your approximate location on the Live Alumni Map to verified
+              members. Turn off anytime.
             </p>
+            {locationError && (
+              <small style={{ color: "#dc2626" }}>{locationError}</small>
+            )}
           </div>
           <button
-            onClick={() => setLocationVisible(!locationVisible)}
+            disabled={locationBusy}
+            onClick={() => void onToggleLocation(!locationVisible)}
             className={`toggle ${locationVisible ? "on" : ""}`}
             aria-label="Toggle location visibility"
             role="switch"
@@ -896,10 +2109,24 @@ function ProfileScreen({
           </button>
           <div className="privacy-status">
             <Icon name={locationVisible ? "check" : "lock"} size={14} />
-            {locationVisible ? "Visible to verified alumni" : "Location hidden"}
+            {locationBusy
+              ? "Updating GPS…"
+              : locationVisible
+                ? "Visible to verified alumni"
+                : "Location hidden"}
           </div>
         </section>
+
         <GlassPanel className="settings-actions">
+          {isAdmin && (
+            <button className="menu-row" onClick={openAdmin}>
+              <span>
+                <FrostedIcon name="shield" />
+                Admin console
+              </span>
+              <Icon name="chevron" />
+            </button>
+          )}
           <button className="menu-row" onClick={() => openSettings("privacy")}>
             <span>
               <FrostedIcon name="shield" />
@@ -921,74 +2148,183 @@ function ProfileScreen({
 }
 
 function PersonProfile({
-  id,
-  socialLinks,
+  userId,
+  currentUserId,
   onBack,
-  message,
+  onMessageStarted,
 }: {
-  id: AlumniId;
-  socialLinks?: SocialLinks;
+  userId: string;
+  currentUserId?: string;
   onBack: () => void;
-  message: () => void;
+  onMessageStarted: (
+    conversationId: string,
+    partner: ChatMemberProfile,
+  ) => void;
 }) {
-  const p = people.find((x) => x.id === id) || people[0];
-  const sharedLinks = getSharedSocialLinks(socialLinks);
+  const [record, setRecord] = useState<{
+    profile: Profile;
+    academicRecords: AcademicRecord[];
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
   const [connected, setConnected] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionNote, setActionNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    getProfileById(userId)
+      .then((res) => {
+        if (active) setRecord(res);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [userId]);
+
+  if (loading) {
+    return (
+      <div className="screen person-profile">
+        <TopBar title="Alumni profile" onBack={onBack} />
+        <div className="content">
+          <p>Loading profile…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!record) {
+    return (
+      <div className="screen person-profile">
+        <TopBar title="Alumni profile" onBack={onBack} />
+        <div className="content">
+          <div className="empty-state">
+            <h3>Profile unavailable</h3>
+            <p>This member profile could not be loaded.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const p = record.profile;
+  const academic = primaryAcademicOf(record.academicRecords);
+  const sharedLinks = getSharedSocialLinks({
+    ...(p.linkedin_url ? { linkedin: p.linkedin_url } : {}),
+    ...(p.website_url ? { website: p.website_url } : {}),
+  });
+  const isSelf = currentUserId === p.user_id;
+
+  async function handleConnect() {
+    if (isSelf || connected || actionBusy) return;
+    setActionBusy(true);
+    setActionNote(null);
+    try {
+      await createMentorshipRequest(
+        p.user_id,
+        "Hi! I’d love to connect on MSGI One.",
+      );
+      setConnected(true);
+      setActionNote("Connection / mentorship request sent.");
+    } catch (err) {
+      setActionNote(
+        err instanceof Error ? err.message : "Could not send request.",
+      );
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function handleMessage() {
+    if (isSelf || actionBusy) return;
+    setActionBusy(true);
+    setActionNote(null);
+    try {
+      const conversationId = await getOrCreateDirectConversation(p.user_id);
+      onMessageStarted(conversationId, {
+        user_id: p.user_id,
+        full_name: p.full_name,
+        avatar_url: p.avatar_url,
+        headline: p.headline,
+        is_verified: p.is_verified,
+      });
+    } catch (err) {
+      setActionNote(
+        err instanceof Error ? err.message : "Could not start conversation.",
+      );
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   return (
     <div className="screen person-profile">
-      <TopBar
-        title="Alumni profile"
-        onBack={onBack}
-        action={
-          <button className="icon-button">
-            <Icon name="spark" />
-          </button>
-        }
-      />
+      <TopBar title="Alumni profile" onBack={onBack} />
       <div className="person-cover">
         <div className="person-card glass-panel">
-          <Avatar person={p} size="xl" />
-          <VerifyBadge />
-          <h1>{p.name}</h1>
+          <Avatar
+            person={{
+              name: p.full_name,
+              role: p.job_title ?? p.role,
+              image: p.avatar_url ?? undefined,
+            }}
+            size="xl"
+          />
+          {p.is_verified && <VerifyBadge />}
+          <h1>{p.full_name}</h1>
           <p>
-            {p.role} at {p.company}
+            {p.job_title || p.role}
+            {p.company ? ` at ${p.company}` : ""}
           </p>
           <span>
-            {p.dept} · Class of {p.year}
+            {academic?.department?.name || "MSGI Alumni"}
+            {academic?.graduation_year
+              ? ` · Class of ${academic.graduation_year}`
+              : ""}
           </span>
-          <small>
-            <Icon name="pin" size={13} />
-            {p.city} · Location shared
-          </small>
-          <div>
-            <button
-              className={connected ? "connected" : ""}
-              onClick={() => setConnected(!connected)}
-            >
-              {connected ? (
-                <>
-                  <Icon name="check" size={16} />
-                  Connected
-                </>
-              ) : (
-                "Connect"
-              )}
-            </button>
-            <button onClick={message}>
-              <Icon name="message" size={16} />
-              Message
-            </button>
-          </div>
+          {p.city && (
+            <small>
+              <Icon name="pin" size={13} />
+              {p.city}
+              {p.country ? `, ${p.country}` : ""}
+            </small>
+          )}
+          {!isSelf && (
+            <div>
+              <button
+                className={connected ? "connected" : ""}
+                disabled={actionBusy}
+                onClick={() => void handleConnect()}
+              >
+                {connected ? (
+                  <>
+                    <Icon name="check" size={16} />
+                    Requested
+                  </>
+                ) : (
+                  "Connect"
+                )}
+              </button>
+              <button
+                disabled={actionBusy}
+                onClick={() => void handleMessage()}
+              >
+                <Icon name="message" size={16} />
+                Message
+              </button>
+            </div>
+          )}
+          {actionNote && <small>{actionNote}</small>}
         </div>
       </div>
       <div className="content person-details">
         <section>
           <p className="eyebrow">ABOUT</p>
-          <h2>Creating reliable products at the intersection of people and technology.</h2>
-          <p>
-            I enjoy mentoring early-career engineers and helping alumni navigate opportunities in
-            product-led companies.
-          </p>
+          <h2>{p.headline || "MSGI Community Member"}</h2>
+          {p.bio && <p>{p.bio}</p>}
         </section>
         {sharedLinks.length > 0 && (
           <section aria-labelledby="social-profiles-title">
@@ -1002,7 +2338,7 @@ function PersonProfile({
                   href={link.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  aria-label={`Open ${p.name}'s ${link.label} in a new tab`}
+                  aria-label={`Open ${p.full_name}'s ${link.label} in a new tab`}
                 >
                   <span className="frosted-icon">
                     <Icon name={socialPlatformIcons[link.key]} size={18} />
@@ -1014,25 +2350,19 @@ function PersonProfile({
             </div>
           </section>
         )}
-        <section>
-          <p className="eyebrow">EXPERIENCE</p>
-          <div className="experience">
-            <span>{p.company.charAt(0)}</span>
-            <div>
-              <h3>{p.role}</h3>
-              <p>{p.company}</p>
-              <small>2022 — Present · {p.city}</small>
+        {p.company && (
+          <section>
+            <p className="eyebrow">EXPERIENCE</p>
+            <div className="experience">
+              <span>{p.company.charAt(0).toUpperCase()}</span>
+              <div>
+                <h3>{p.job_title || p.role}</h3>
+                <p>{p.company}</p>
+                {p.city && <small>{p.city}</small>}
+              </div>
             </div>
-          </div>
-        </section>
-        <section>
-          <p className="eyebrow">OPEN TO</p>
-          <div className="skill-list">
-            <span>Mentoring</span>
-            <span>Referrals</span>
-            <span>Speaking</span>
-          </div>
-        </section>
+          </section>
+        )}
       </div>
     </div>
   );
@@ -1052,26 +2382,115 @@ function EventsScreen({
     item?.scrollIntoView({ block: "center" });
     item?.focus({ preventScroll: true });
   }, [destination]);
+function EventsScreen({ onBack }: { onBack: () => void }) {
+  const [tab, setTab] = useState<"Events" | "Opportunities">("Events");
+  const [events, setEvents] = useState<AlumniEvent[]>([]);
+  const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
+  const [registeredIds, setRegisteredIds] = useState<Set<string>>(new Set());
+  const [appliedIds, setAppliedIds] = useState<Set<string>>(new Set());
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    Promise.all([getEvents(), getOpportunities(), getMyEventRegistrations()])
+      .then(([evList, oppList, myRegs]) => {
+        if (!active) return;
+        setEvents(evList);
+        setOpportunities(oppList);
+        setRegisteredIds(new Set(myRegs.map((r) => r.event_id)));
+      })
+      .catch((err) => {
+        if (active)
+          setError(
+            err instanceof Error ? err.message : "Failed to load listings.",
+          );
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function toggleRsvp(eventId: string) {
+    setBusyId(eventId);
+    setError(null);
+    try {
+      if (registeredIds.has(eventId)) {
+        await cancelEventRegistration(eventId);
+        setRegisteredIds((prev) => {
+          const next = new Set(prev);
+          next.delete(eventId);
+          return next;
+        });
+      } else {
+        await registerForEvent(eventId);
+        setRegisteredIds((prev) => new Set(prev).add(eventId));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update RSVP.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleApply(opp: Opportunity) {
+    if (appliedIds.has(opp.id)) return;
+    setBusyId(opp.id);
+    setError(null);
+    try {
+      await applyToOpportunity({ opportunityId: opp.id });
+      setAppliedIds((prev) => new Set(prev).add(opp.id));
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not submit application.",
+      );
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   return (
     <div className="screen">
       <TopBar title="Events & opportunities" onBack={onBack} />
       <div className="content events-content">
         <div className="inbox-tabs">
-          <button className={tab === "Events" ? "active" : ""} onClick={() => setTab("Events")}>
-            Events
+          <button
+            className={tab === "Events" ? "active" : ""}
+            onClick={() => setTab("Events")}
+          >
+            Events ({events.length})
           </button>
           <button
             className={tab === "Opportunities" ? "active" : ""}
             onClick={() => setTab("Opportunities")}
           >
-            Opportunities
+            Opportunities ({opportunities.length})
           </button>
         </div>
+
+        {error && (
+          <div className="error-banner" role="alert">
+            <Icon name="alert" size={16} />
+            {error}
+          </div>
+        )}
+
         <div className="editorial-head">
           <p className="eyebrow">
-            {tab === "Events" ? "CURATED FOR CHENNAI" : "CURATED FOR YOUR PROFILE"}
+            {tab === "Events"
+              ? "MSGI ALUMNI CALENDAR"
+              : "CURATED FOR YOUR PROFILE"}
           </p>
-          <h1>{tab === "Events" ? "Meet, learn and reconnect." : "Your next move starts here."}</h1>
+          <h1>
+            {tab === "Events"
+              ? "Meet, learn and reconnect."
+              : "Your next move starts here."}
+          </h1>
         </div>
         {tab === "Events" ? (
           <div className="event-list">
@@ -1162,6 +2581,128 @@ function EventsScreen({
                 View opportunity <Icon name="arrow" />
               </button>
             </article>
+
+        {loading ? (
+          <p>Loading {tab.toLowerCase()}…</p>
+        ) : tab === "Events" ? (
+          events.length > 0 ? (
+            <div className="event-list">
+              {events.map((ev, index) => {
+                const parts = formatEventDateParts(ev.start_time);
+                const isGoing = registeredIds.has(ev.id);
+                if (index === 0) {
+                  return (
+                    <article className="large-event" key={ev.id}>
+                      <div className="event-visual">
+                        <span>
+                          {parts.day}
+                          <br />
+                          <small>{parts.month}</small>
+                        </span>
+                        <b>{ev.is_online ? "ONLINE" : "FEATURED"}</b>
+                      </div>
+                      <div>
+                        <p className="eyebrow">
+                          {(ev.event_type || "ALUMNI EVENT").toUpperCase()}
+                        </p>
+                        <h2>{ev.title}</h2>
+                        {ev.description && <p>{ev.description}</p>}
+                        <span>
+                          <Icon name="pin" size={14} />
+                          {ev.is_online ? "Online" : ev.venue || "MSGI Campus"}
+                          {parts.time ? ` · ${parts.time}` : ""}
+                        </span>
+                        <button
+                          disabled={busyId === ev.id}
+                          onClick={() => void toggleRsvp(ev.id)}
+                        >
+                          {isGoing ? "Cancel RSVP" : "Reserve your seat"}{" "}
+                          <Icon name={isGoing ? "check" : "arrow"} size={15} />
+                        </button>
+                      </div>
+                    </article>
+                  );
+                }
+                return (
+                  <article className="simple-event" key={ev.id}>
+                    <div className="date-block">
+                      <strong>{parts.day}</strong>
+                      <span>{parts.month}</span>
+                    </div>
+                    <div>
+                      <p className="eyebrow">
+                        {(ev.event_type || "EVENT").toUpperCase()}
+                      </p>
+                      <h3>{ev.title}</h3>
+                      <span>
+                        {ev.is_online ? "Online" : ev.venue || "TBA"}
+                        {parts.time ? ` · ${parts.time}` : ""}
+                      </span>
+                    </div>
+                    <button
+                      disabled={busyId === ev.id}
+                      onClick={() => void toggleRsvp(ev.id)}
+                    >
+                      <Icon name={isGoing ? "check" : "chevron"} />
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <h3>No published events yet</h3>
+              <p>Upcoming alumni meetups and workshops will appear here.</p>
+            </div>
+          )
+        ) : opportunities.length > 0 ? (
+          <div className="opportunity-list">
+            {opportunities.map((opp) => {
+              const applied = appliedIds.has(opp.id);
+              return (
+                <article key={opp.id}>
+                  <div className="opportunity-head">
+                    <span className="company-tile">
+                      {(opp.company_name || opp.title).charAt(0).toUpperCase()}
+                    </span>
+                    <div>
+                      <small>
+                        {(opp.company_name || "MSGI NETWORK").toUpperCase()}
+                      </small>
+                      <h3>{opp.title}</h3>
+                      <p>
+                        {[opp.location, opp.work_mode]
+                          .filter(Boolean)
+                          .join(" · ") || opp.opportunity_type}
+                      </p>
+                    </div>
+                    <VerifyBadge label={opp.opportunity_type} />
+                  </div>
+                  <p>{opp.description}</p>
+                  <button
+                    disabled={busyId === opp.id}
+                    onClick={() => void handleApply(opp)}
+                    className={applied ? "success-button" : ""}
+                  >
+                    {applied ? (
+                      <>
+                        <Icon name="check" />
+                        Application submitted
+                      </>
+                    ) : (
+                      <>
+                        Apply now <Icon name="arrow" />
+                      </>
+                    )}
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="empty-state">
+            <h3>No opportunities posted yet</h3>
+            <p>Alumni job referrals and internships will show up here.</p>
           </div>
         )}
       </div>
@@ -1172,47 +2713,92 @@ function EventsScreen({
 function EditProfile({
   alumniId,
   account,
+  initialHeadline,
+  initialBio,
   socialLinks,
   onSaveSocialLinks,
+  onSavedProfile,
   onBack,
 }: {
   alumniId: AlumniId;
   account: UserSettings["account"];
+  initialHeadline: string;
+  initialBio: string;
   socialLinks?: SocialLinks;
   onSaveSocialLinks: (record: AlumniSocialLinksRecord) => void;
+  onSavedProfile: () => Promise<void>;
   onBack: () => void;
 }) {
+  const [headline, setHeadline] = useState(initialHeadline);
+  const [jobTitle, setJobTitle] = useState(account.role);
+  const [company, setCompany] = useState(account.company);
+  const [city, setCity] = useState(account.city);
+  const [bio, setBio] = useState(initialBio);
+  const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [socialDraft, setSocialDraft] = useState<SocialLinksDraft>(() =>
     toSocialLinksDraft(socialLinks),
   );
   const [socialErrors, setSocialErrors] = useState<SocialLinkErrors>({});
   const hasSocialErrors = Object.keys(socialErrors).length > 0;
+
   const updateSocialLink = (platform: SocialPlatform, value: string) => {
     setSaved(false);
     setSocialDraft((draft) => ({ ...draft, [platform]: value }));
     setSocialErrors(({ [platform]: _removed, ...errors }) => errors);
   };
-  const save = () => {
+
+  const save = async () => {
     const { links, errors } = validateSocialLinks(socialDraft);
     setSocialErrors(errors);
     if (Object.keys(errors).length) {
       setSaved(false);
       return false;
     }
-    onSaveSocialLinks({ alumniId, links, updatedAt: new Date().toISOString() });
-    setSocialDraft(toSocialLinksDraft(links));
-    setSaved(true);
-    return true;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await updateMyProfile({
+        headline: headline.trim() || null,
+        job_title: jobTitle.trim() || null,
+        company: company.trim() || null,
+        city: city.trim() || null,
+        bio: bio.trim() || null,
+        linkedin_url: links.linkedin ?? null,
+        website_url: links.website ?? null,
+      });
+      onSaveSocialLinks({
+        alumniId,
+        links,
+        updatedAt: new Date().toISOString(),
+      });
+      setSocialDraft(toSocialLinksDraft(links));
+      await onSavedProfile();
+      setSaved(true);
+      return true;
+    } catch (err) {
+      setSaveError(
+        err instanceof Error ? err.message : "Failed to save profile.",
+      );
+      return false;
+    } finally {
+      setSaving(false);
+    }
   };
+
   return (
     <div className="screen">
       <TopBar
         title="Edit profile"
         onBack={onBack}
         action={
-          <button className="save-link" onClick={save}>
-            Save
+          <button
+            className="save-link"
+            onClick={() => void save()}
+            disabled={saving}
+          >
+            {saving ? "Saving…" : "Save"}
           </button>
         }
       />
@@ -1223,18 +2809,22 @@ function EditProfile({
             Profile updated successfully
           </div>
         )}
-        {hasSocialErrors && (
+        {(hasSocialErrors || saveError) && (
           <div className="error-banner" role="alert">
             <Icon name="close" />
-            Check the highlighted social links before saving.
+            {saveError ?? "Check the highlighted social links before saving."}
           </div>
         )}
         <div className="edit-photo glass-panel">
           <Avatar
-            person={{ name: account.fullName, role: account.role, image: account.avatar }}
+            person={{
+              name: account.fullName,
+              role: account.role,
+              image: account.avatar,
+            }}
             size="xl"
           />
-          <button>
+          <button type="button">
             <Icon name="edit" size={16} />
           </button>
           <div>
@@ -1246,25 +2836,39 @@ function EditProfile({
           <p className="form-section-label">PROFESSIONAL DETAILS</p>
           <label className="field">
             <span>Headline</span>
-            <input defaultValue="Senior Product Designer at Freshworks" />
+            <input
+              value={headline}
+              onChange={(e) => setHeadline(e.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>Job title</span>
+            <input
+              value={jobTitle}
+              onChange={(e) => setJobTitle(e.target.value)}
+            />
           </label>
           <label className="field">
             <span>Company</span>
-            <input defaultValue="Freshworks" />
+            <input
+              value={company}
+              onChange={(e) => setCompany(e.target.value)}
+            />
           </label>
           <label className="field">
-            <span>Location</span>
-            <input defaultValue="Chennai, India" />
+            <span>City</span>
+            <input value={city} onChange={(e) => setCity(e.target.value)} />
           </label>
           <label className="field">
             <span>About</span>
-            <textarea defaultValue="Building thoughtful tools for growing teams." />
+            <textarea value={bio} onChange={(e) => setBio(e.target.value)} />
           </label>
         </GlassPanel>
         <GlassPanel className="edit-form social-form">
           <p className="form-section-label">SOCIAL MEDIA LINKS</p>
           <p className="form-help">
-            Add only the profiles you want verified alumni to see. Empty fields stay hidden.
+            Add only the profiles you want verified alumni to see. Empty fields
+            stay hidden.
           </p>
           {socialPlatforms.map((platform) => {
             const error = socialErrors[platform.key];
@@ -1272,7 +2876,9 @@ function EditProfile({
             return (
               <div className="field social-field" key={platform.key}>
                 <label htmlFor={inputId}>{platform.label}</label>
-                <div className={`input-wrap ${error ? "input-wrap--error" : ""}`}>
+                <div
+                  className={`input-wrap ${error ? "input-wrap--error" : ""}`}
+                >
                   <Icon name={socialPlatformIcons[platform.key]} size={18} />
                   <input
                     id={inputId}
@@ -1283,7 +2889,9 @@ function EditProfile({
                     spellCheck={false}
                     placeholder={platform.placeholder}
                     value={socialDraft[platform.key]}
-                    onChange={(event) => updateSocialLink(platform.key, event.target.value)}
+                    onChange={(event) =>
+                      updateSocialLink(platform.key, event.target.value)
+                    }
                     aria-invalid={Boolean(error)}
                     aria-describedby={error ? `${inputId}-error` : undefined}
                   />
@@ -1298,11 +2906,12 @@ function EditProfile({
           })}
           <button
             className="primary-button"
-            onClick={() => {
-              if (save()) window.setTimeout(onBack, 700);
+            disabled={saving}
+            onClick={async () => {
+              if (await save()) window.setTimeout(onBack, 700);
             }}
           >
-            Save changes
+            {saving ? "Saving…" : "Save changes"}
           </button>
         </GlassPanel>
       </div>
@@ -1330,10 +2939,31 @@ export default function App({ services = disconnectedServices }: { services?: Ap
   const [settings, setSettings] = useState<UserSettings>(() => {
     return loadSettings(account);
   });
+export default function App() {
+  const {
+    user,
+    profile,
+    details,
+    academicRecords,
+    isAuthenticated,
+    isAdmin,
+    loading: authLoading,
+    refreshProfile,
+  } = useAuth();
+
+  const [settings, setSettings] = useState<UserSettings>(() =>
+    loadSettings(fallbackAccount),
+  );
   const [screen, setScreen] = useState<Screen>("home");
   const [overlay, setOverlay] = useState<Overlay>("none");
   const [settingsStack, setSettingsStack] = useState<SettingsRoute[]>([]);
-  const [selectedPerson, setSelectedPerson] = useState(1);
+  const [selectedPersonId, setSelectedPersonId] = useState<string | null>(null);
+  const [activeChat, setActiveChat] = useState<{
+    conversationId: string;
+    partner?: ChatMemberProfile | null;
+    title?: string | null;
+  } | null>(null);
+  const [unreadCount, setUnreadCount] = useState(0);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [resetLink, setResetLink] = useState(() => parseResetLink(window.location.hash));
   const [accessPage, setAccessPage] = useState<"login" | "forgot" | "support">(
@@ -1343,24 +2973,100 @@ export default function App({ services = disconnectedServices }: { services?: Ap
   const [feedTarget, setFeedTarget] = useState<string | null>(null);
   const [feedCreationOpen, setFeedCreationOpen] = useState(false);
   const [eventTarget, setEventTarget] = useState<{ type: "event" | "opportunity"; id: string } | null>(null);
+  const [preferAdminTab, setPreferAdminTab] = useState(false);
+  const [locationBusy, setLocationBusy] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
   const [pendingProfileId, setPendingProfileId] = useState<number | null>(() =>
-    typeof window === "undefined" ? null : parseSharedProfileId(window.location.search),
+    typeof window === "undefined"
+      ? null
+      : parseSharedProfileId(window.location.search),
   );
   const [publicViewDismissed, setPublicViewDismissed] = useState(false);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(() =>
     prefersDark() ? "dark" : "light",
   );
-  // Keyed by alumni account so a public profile can only read its owner's links.
-  const [socialLinksByAlumni, setSocialLinksByAlumni] = useState<Record<AlumniId, SocialLinks>>({});
+  const [socialLinksByAlumni, setSocialLinksByAlumni] = useState<
+    Record<AlumniId, SocialLinks>
+  >({});
 
-  const t = useMemo(() => createTranslator(settings.language), [settings.language]);
+  // Sync Supabase profile + private details + academic records into UI settings.account
+  useEffect(() => {
+    if (!isAuthenticated || !user) return;
+    const primaryAcademic = primaryAcademicOf(academicRecords);
+    const resolvedName =
+      profile?.full_name?.trim() ||
+      (user.user_metadata?.full_name as string | undefined) ||
+      user.email?.split("@")[0] ||
+      "MSGI Member";
+    const resolvedRole =
+      profile?.job_title ||
+      (profile?.role === "admin"
+        ? "Administrator"
+        : profile?.role === "student"
+          ? "Student"
+          : "Alumni");
+
+    setSettings((current) =>
+      withCurrentSession(
+        {
+          ...current,
+          account: {
+            ...current.account,
+            fullName: resolvedName,
+            email:
+              user.email ?? details?.personal_email ?? current.account.email,
+            phone: details?.phone ?? "",
+            role: resolvedRole,
+            company: profile?.company ?? "",
+            city: profile?.city ?? "",
+            department:
+              primaryAcademic?.department?.name ?? current.account.department,
+            graduationYear: primaryAcademic?.graduation_year
+              ? String(primaryAcademic.graduation_year)
+              : current.account.graduationYear,
+            verified: Boolean(profile?.is_verified),
+            avatar: profile?.avatar_url ?? "",
+          },
+        },
+        false,
+      ),
+    );
+
+    if (profile?.linkedin_url || profile?.website_url) {
+      setSocialLinksByAlumni((current) => ({
+        ...current,
+        [currentAlumniId]: {
+          ...current[currentAlumniId],
+          ...(profile.linkedin_url ? { linkedin: profile.linkedin_url } : {}),
+          ...(profile.website_url ? { website: profile.website_url } : {}),
+        },
+      }));
+    }
+  }, [isAuthenticated, user, profile, details, academicRecords]);
+
+  // Gate Admin screen strictly by profile?.role === 'admin'
+  useEffect(() => {
+    if (preferAdminTab && isAuthenticated && !authLoading) {
+      if (isAdmin) setScreen("admin");
+      setPreferAdminTab(false);
+    }
+    if (screen === "admin" && !isAdmin) {
+      setScreen("home");
+    }
+  }, [preferAdminTab, isAuthenticated, authLoading, isAdmin, screen]);
+
+  const ownHeadline = profile?.headline || profile?.bio || defaultHeadline;
+  const t = useMemo(
+    () => createTranslator(settings.language),
+    [settings.language],
+  );
   const locale = localeFor(settings.language);
   const { appearance, language, privacy } = settings;
   const resolvedTheme = resolveTheme(appearance.theme, systemTheme === "dark");
   const mainProfile: AvatarPerson = {
     name: settings.account.fullName,
     role: settings.account.role,
-    image: settings.account.avatar,
+    image: settings.account.avatar || undefined,
   };
   useEffect(() => {
     const onHashChange = () => {
@@ -1398,7 +3104,8 @@ export default function App({ services = disconnectedServices }: { services?: Ap
   useEffect(() => {
     const query = window.matchMedia?.("(prefers-color-scheme: dark)");
     if (!query) return;
-    const onChange = (event: MediaQueryListEvent) => setSystemTheme(event.matches ? "dark" : "light");
+    const onChange = (event: MediaQueryListEvent) =>
+      setSystemTheme(event.matches ? "dark" : "light");
     query.addEventListener("change", onChange);
     return () => query.removeEventListener("change", onChange);
   }, []);
@@ -1411,10 +3118,9 @@ export default function App({ services = disconnectedServices }: { services?: Ap
     root.lang = language;
   }, [resolvedTheme, appearance.textSize, appearance.reduceMotion, language]);
 
-  // Persist only for the signed-in member; signing out or deleting must not rewrite storage.
   useEffect(() => {
-    if (signedIn) saveSettings(settings);
-  }, [settings, signedIn]);
+    if (isAuthenticated) saveSettings(settings);
+  }, [settings, isAuthenticated]);
 
   const update = useCallback(
     <K extends SettingsSection>(
@@ -1425,20 +3131,50 @@ export default function App({ services = disconnectedServices }: { services?: Ap
         ...current,
         [section]:
           typeof next === "function"
-            ? (next as (value: UserSettings[K]) => UserSettings[K])(current[section])
+            ? (next as (value: UserSettings[K]) => UserSettings[K])(
+                current[section],
+              )
             : next,
       })),
     [],
   );
 
+  const handleToggleLocation = useCallback(
+    async (nextVisible: boolean) => {
+      setLocationBusy(true);
+      setLocationError(null);
+      try {
+        await setLocationSharing(nextVisible);
+        update("privacy", (current) => ({
+          ...current,
+          locationVisible: nextVisible,
+        }));
+      } catch (err) {
+        setLocationError(
+          err instanceof Error
+            ? err.message
+            : "Could not update live location (verified alumni only).",
+        );
+      } finally {
+        setLocationBusy(false);
+      }
+    },
+    [update],
+  );
+
   const saveSocialLinks = ({ alumniId, links }: AlumniSocialLinksRecord) =>
     setSocialLinksByAlumni((current) => ({ ...current, [alumniId]: links }));
-  const openPerson = (id: number) => {
-    setSelectedPerson(id);
+
+  const openPerson = (userId: string) => {
+    setSelectedPersonId(userId);
     setOverlay("person");
   };
-  const openChat = (id: number) => {
-    setSelectedPerson(id);
+  const openChat = (
+    conversationId: string,
+    partner?: ChatMemberProfile | null,
+    title?: string | null,
+  ) => {
+    setActiveChat({ conversationId, partner, title });
     setOverlay("chat");
   };
   const openSettings = (route: SettingsRoute) => {
@@ -1470,13 +3206,13 @@ export default function App({ services = disconnectedServices }: { services?: Ap
     return null;
   };
   const settingsBack = () => {
-    // Leaving the first Settings screen returns to wherever Settings was opened from.
     if (settingsStack.length <= 1) {
       setSettingsStack([]);
       setOverlay("none");
     } else setSettingsStack(settingsStack.slice(0, -1));
   };
-  const closePreview = () => setOverlay(settingsStack.length ? "settings" : "none");
+  const closePreview = () =>
+    setOverlay(settingsStack.length ? "settings" : "none");
   const editPrivacyFromPreview = () => {
     setSettingsStack((stack) => [...stack, "privacy"]);
     setOverlay("settings");
@@ -1497,8 +3233,11 @@ export default function App({ services = disconnectedServices }: { services?: Ap
     const session = requireVerified(result);
     setAccount(session.account);
     setSettings(withCurrentSession(loadSettings(session.account), true));
+  const handleSignedIn = (preferAdmin: boolean) => {
+    setSettings((current) => withCurrentSession(current, true));
     setAuthNotice(null);
     setPublicViewDismissed(false);
+    setPreferAdminTab(preferAdmin);
     setScreen("home");
     setOverlay("none");
     setSignedIn(true);
@@ -1506,14 +3245,25 @@ export default function App({ services = disconnectedServices }: { services?: Ap
   };
   const logout = async (notice?: string) => {
     if (services.membershipAuth) await services.membershipAuth.signOut(new AbortController().signal);
+  };
+
+  const logout = async (notice?: string) => {
+    try {
+      await backendSignOut();
+    } catch (err) {
+      console.error("Supabase sign-out error:", err);
+    }
     setSettings((current) => ({
       ...current,
       security: {
         ...current.security,
-        sessions: current.security.sessions.filter((session) => !session.current),
+        sessions: current.security.sessions.filter(
+          (session) => !session.current,
+        ),
       },
     }));
-    setSignedIn(false);
+    setActiveChat(null);
+    setUnreadCount(0);
     setScreen("home");
     setOverlay("none");
     setSettingsStack([]);
@@ -1521,11 +3271,14 @@ export default function App({ services = disconnectedServices }: { services?: Ap
     returnToLogin();
     setNotificationUnread(0);
   };
+
   const deleteAccount = () => {
-    clearStoredSettings(account.id);
-    setSocialLinksByAlumni(({ [account.id]: _removed, ...rest }) => rest);
-    setSettings(createDefaultSettings(account));
-    logout(t("delete.notice"));
+    clearStoredSettings(fallbackAccount.id);
+    setSocialLinksByAlumni(
+      ({ [fallbackAccount.id]: _removed, ...rest }) => rest,
+    );
+    setSettings(createDefaultSettings(fallbackAccount));
+    void logout(t("delete.notice"));
   };
 
   const profileUrl = useMemo(
@@ -1542,28 +3295,40 @@ export default function App({ services = disconnectedServices }: { services?: Ap
   const sharedTarget =
     pendingProfileId === null
       ? null
-      : pendingProfileId === account.id
+      : pendingProfileId === fallbackAccount.id
         ? "self"
-        : people.some((person) => person.id === pendingProfileId)
-          ? "person"
-          : "missing";
+        : "missing";
 
-  // Shared links open once the visitor is signed in, then the URL is cleaned up.
   useEffect(() => {
-    if (!signedIn || pendingProfileId === null) return;
+    if (!isAuthenticated || pendingProfileId === null) return;
     if (sharedTarget === "self") setOverlay("preview");
-    else if (sharedTarget === "person") {
-      setSelectedPerson(pendingProfileId);
-      setOverlay("person");
-    } else setOverlay("unavailable");
+    else setOverlay("unavailable");
     setSettingsStack([]);
     setPendingProfileId(null);
     removeSharedProfileParam();
-  }, [signedIn, pendingProfileId, sharedTarget]);
+  }, [isAuthenticated, pendingProfileId, sharedTarget]);
+
+  if (authLoading && !isAuthenticated) {
+    return (
+      <div className="app-stage">
+        <div className="phone-shell">
+          <div
+            className="screen flex items-center justify-center"
+            role="status"
+          >
+            Restoring session…
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!signedIn || resetLink.requested) {
+  if (!isAuthenticated) {
     const showPublicProfile =
-      sharedTarget === "self" && privacy.profileVisibility === "public" && !publicViewDismissed;
+      sharedTarget === "self" &&
+      privacy.profileVisibility === "public" &&
+      !publicViewDismissed;
     const linkNotice =
       sharedTarget === "missing"
         ? t("link.invalid")
@@ -1602,20 +3367,25 @@ export default function App({ services = disconnectedServices }: { services?: Ap
               onPreview={services.membershipAuth ? undefined : openWebsitePreview}
               onForgotPassword={() => setAccessPage("forgot")}
               onSupport={() => setAccessPage("support")} />
+            <Auth
+              onSignedIn={handleSignedIn}
+              notice={linkNotice ?? authNotice}
+            />
           )}
         </div>
         <div className="desktop-note">
           <Logo />
           <h1>A private network for a lifetime of opportunity.</h1>
           <p>
-            MSGI One connects verified alumni through meaningful introductions, trusted career
-            opportunities and shared institutional pride.
+            MSGI One connects verified alumni through meaningful introductions,
+            trusted career opportunities and shared institutional pride.
           </p>
           <span>Designed for the MSGI alumni community</span>
         </div>
       </div>
     );
   }
+
   let content: ReactNode;
   if (overlay === "notifications")
     content = (
@@ -1627,7 +3397,10 @@ export default function App({ services = disconnectedServices }: { services?: Ap
     content = (
       <Suspense
         fallback={
-          <div className="screen flex items-center justify-center" role="status">
+          <div
+            className="screen flex items-center justify-center"
+            role="status"
+          >
             {t("settings.loading")}
           </div>
         }
@@ -1649,6 +3422,7 @@ export default function App({ services = disconnectedServices }: { services?: Ap
           reportablePeople={reportablePeople}
           supportService={services.support}
           returnToApp={() => { setOverlay("none"); setSettingsStack([]); }}
+          reportablePeople={[]}
         />
       </Suspense>
     );
@@ -1667,35 +3441,42 @@ export default function App({ services = disconnectedServices }: { services?: Ap
     );
   else if (overlay === "unavailable")
     content = <ProfileUnavailable t={t} onBack={() => setOverlay("none")} />;
-  else if (overlay === "person")
+  else if (overlay === "person" && selectedPersonId)
     content = (
       <PersonProfile
-        id={selectedPerson}
-        socialLinks={socialLinksByAlumni[selectedPerson]}
+        userId={selectedPersonId}
+        currentUserId={user?.id}
         onBack={() => setOverlay("none")}
-        message={() => setOverlay("chat")}
+        onMessageStarted={(conversationId, partner) =>
+          openChat(conversationId, partner)
+        }
       />
     );
-  else if (overlay === "chat")
+  else if (overlay === "chat" && activeChat)
     content = (
       <ChatScreen
-        store={messaging}
-        id={selectedPerson}
+        conversationId={activeChat.conversationId}
+        partner={activeChat.partner}
+        title={activeChat.title}
         onBack={() => setOverlay("none")}
-        viewProfile={() => setOverlay("person")}
+        viewProfile={(uid) => openPerson(uid)}
       />
     );
   else if (overlay === "events")
     content = <EventsScreen destination={eventTarget} onBack={() => {
       setEventTarget(null); setOverlay("none");
     }} />;
+    content = <EventsScreen onBack={() => setOverlay("none")} />;
   else if (overlay === "edit")
     content = (
       <EditProfile
         alumniId={currentAlumniId}
         account={settings.account}
+        initialHeadline={profile?.headline ?? ""}
+        initialBio={profile?.bio ?? ""}
         socialLinks={socialLinksByAlumni[currentAlumniId]}
         onSaveSocialLinks={saveSocialLinks}
+        onSavedProfile={refreshProfile}
         onBack={() => setOverlay("none")}
       />
     );
@@ -1723,15 +3504,33 @@ export default function App({ services = disconnectedServices }: { services?: Ap
         openPerson={openPerson}
         profile={mainProfile}
         onProfile={() => setScreen("profile")}
+        isVerified={Boolean(profile?.is_verified)}
+        locationVisible={privacy.locationVisible}
+        onToggleLocation={handleToggleLocation}
       />
     );
   else if (screen === "feed")
     content = <CommunityFeed profile={mainProfile} onProfile={() => setScreen("profile")} focusPostId={feedTarget} onCreationChange={setFeedCreationOpen} />;
+    content = (
+      <CommunityFeed
+        profile={mainProfile}
+        onProfile={() => setScreen("profile")}
+        onOpenPerson={openPerson}
+        onOpenEvents={() => setOverlay("events")}
+      />
+    );
   else if (screen === "inbox")
     content = (
       <InboxScreen
         openChat={openChat}
-        store={messaging}
+        profile={mainProfile}
+        onProfile={() => setScreen("profile")}
+        onUnreadChange={setUnreadCount}
+      />
+    );
+  else if (screen === "admin" && isAdmin)
+    content = (
+      <AdminScreen
         profile={mainProfile}
         onProfile={() => setScreen("profile")}
       />
@@ -1740,14 +3539,20 @@ export default function App({ services = disconnectedServices }: { services?: Ap
     content = (
       <ProfileScreen
         account={settings.account}
+        headline={ownHeadline}
+        bio={profile?.bio ?? ""}
+        linkedinUrl={profile?.linkedin_url}
         locationVisible={privacy.locationVisible}
-        setLocationVisible={(locationVisible) =>
-          update("privacy", (current) => ({ ...current, locationVisible }))
-        }
+        locationBusy={locationBusy}
+        locationError={locationError}
+        onToggleLocation={handleToggleLocation}
         openSettings={openSettings}
         edit={() => setOverlay("edit")}
+        isAdmin={isAdmin}
+        openAdmin={() => setScreen("admin")}
       />
     );
+
   return (
     <NotificationNavigation.Provider value={{
       open: () => setOverlay("notifications"), unread: notificationUnread,
@@ -1756,6 +3561,15 @@ export default function App({ services = disconnectedServices }: { services?: Ap
       <div className="phone-shell">
         {content}
         {overlay === "none" && !(screen === "feed" && feedCreationOpen) && <BottomNav screen={screen} setScreen={setScreen} t={t} />}
+        {overlay === "none" && (
+          <BottomNav
+            screen={screen}
+            setScreen={setScreen}
+            t={t}
+            isAdmin={isAdmin}
+            unreadCount={unreadCount}
+          />
+        )}
       </div>
       <div className="desktop-note">
         <Logo />
