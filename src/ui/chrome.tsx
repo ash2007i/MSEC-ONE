@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useContext, type ReactNode } from "react";
+import { NotificationNavigation } from "../network/navigation";
 import institutionLogo from "../assets/msgi-institution-logo.png";
 import msgiOneLogo from "../assets/msgi-one-logo.png";
 
@@ -506,14 +507,22 @@ export function Icon({
 }
 
 
-export function Logo({ compact = false }: { compact?: boolean }) {
+export function Logo({
+  compact = false,
+  showInstitution = true,
+}: {
+  compact?: boolean;
+  showInstitution?: boolean;
+}) {
   return (
     <div className={`brand ${compact ? "brand--compact" : ""}`}>
-      <img
-        className="brand__institution"
-        src={institutionLogo}
-        alt="Meenakshi Sundararajan Group of Institutions"
-      />
+      {showInstitution && (
+        <img
+          className="brand__institution"
+          src={institutionLogo}
+          alt="Meenakshi Sundararajan Group of Institutions"
+        />
+      )}
       <img className="brand__one" src={msgiOneLogo} alt="MSGI One — Alumni Network & Community" />
     </div>
   );
@@ -522,7 +531,7 @@ export function Logo({ compact = false }: { compact?: boolean }) {
 export function BrandBar({ action }: { action?: ReactNode }) {
   return (
     <div className="brand-bar">
-      <Logo compact />
+      <Logo compact showInstitution={false} />
       {action && <div className="brand-bar__action">{action}</div>}
     </div>
   );
@@ -537,15 +546,16 @@ export function MainHeader({
   onProfile: () => void;
   onNotifications?: () => void;
 }) {
+  const notifications = useContext(NotificationNavigation);
   return (
     <div className="main-header">
       <button className="main-header__profile" onClick={onProfile} aria-label="Open profile">
         <Avatar person={person} size="md" />
       </button>
-      <Logo compact />
-      <button className="notification" onClick={onNotifications} aria-label="Notifications">
+      <Logo compact showInstitution={false} />
+      <button className="notification" onClick={onNotifications ?? notifications?.open} aria-label="Notifications">
         <Icon name="bell" />
-        <span />
+        {(!notifications || notifications.unread > 0) && <span />}
       </button>
     </div>
   );

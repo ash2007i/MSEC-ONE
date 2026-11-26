@@ -1,5 +1,4 @@
 import {
-  FormEvent,
   ReactNode,
   Suspense,
   lazy,
@@ -7,9 +6,23 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import feedNavLogo from "./assets/msgi-feed-nav.png";
+import { AuthFlow } from "./auth/AuthFlow";
+import { requireVerified, type MembershipSession } from "./auth/model";
+import { createMessagingStore, type MessagingStore } from "./messaging/model";
+import { CommunityFeed, feedPostExists } from "./feed/CommunityFeed";
+import { ForgotPassword } from "./network/ForgotPassword";
+import { SupportPage } from "./network/SupportPage";
+import { NotificationsPage } from "./network/NotificationsPage";
+import { NotificationNavigation } from "./network/navigation";
+import { parseResetLink, validateNotifications } from "./network/model";
+import type { AppServices, NotificationTarget } from "./network/services";
+import { useAnimatedDismiss } from "./ui/motion";
+import { LocationFilter } from "./directory/LocationFilter";
+import { matchesLocation, type LocationSelection } from "./directory/locations";
 import { useAuth } from "./backend/AuthContext";
 import {
   getMyVerificationStatus,
@@ -121,6 +134,7 @@ const ConversationScreen = lazy(() =>
 );
 const SettingsFlow = lazy(() => import("./settings/SettingsFlow"));
 
+type Screen = "home" | "directory" | "map" | "feed" | "inbox" | "profile";
 type Screen =
   | "home"
   | "directory"
@@ -137,9 +151,13 @@ type Overlay =
   | "events"
   | "edit"
   | "settings"
+  | "notifications"
   | "preview"
   | "unavailable";
 
+/** Signed-out appearance fallback only; never authorizes access to the application. */
+const signedInAccount = createSampleAccount();
+const ownHeadline = "Building thoughtful tools for growing teams.";
 type DirectoryMember = Profile & { academicRecords: AcademicRecord[] };
 
 const fallbackAccount = createSampleAccount();
@@ -221,6 +239,94 @@ function removeSharedProfileParam() {
 }
 
 const prefersDark = () =>
+  typeof window !== "undefined" && Boolean(window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+
+const people = [
+  {
+    id: 1,
+    name: "Priya Raman",
+    dept: "Information Technology",
+    year: "2024",
+    role: "Software Engineer",
+    company: "Zoho",
+    city: "Chennai",
+    distance: "2.4 km",
+    image:
+      "https://images.unsplash.com/photo-1655249493799-9cee4fe983bb?auto=format&fit=crop&w=300&q=85",
+  },
+  {
+    id: 2,
+    name: "Karthik Raj",
+    dept: "Mechanical Engineering",
+    year: "2019",
+    role: "Program Manager",
+    company: "Royal Enfield",
+    city: "Chennai",
+    distance: "4.8 km",
+    image:
+      "https://images.unsplash.com/photo-1589386417686-0d34b5903d23?auto=format&fit=crop&w=300&q=85",
+  },
+  {
+    id: 3,
+    name: "Siddharth Menon",
+    dept: "Computer Science",
+    year: "2018",
+    role: "Engineering Lead",
+    company: "Infosys",
+    city: "Bengaluru",
+    distance: "—",
+    image:
+      "https://images.unsplash.com/photo-1737574821698-862e77f044c1?auto=format&fit=crop&w=300&q=85",
+  },
+  {
+    id: 4,
+    name: "Anjali Krishnan",
+    dept: "Electronics & Communication",
+    year: "2021",
+    role: "Product Designer",
+    company: "Intel",
+    city: "Bengaluru",
+    distance: "—",
+    image:
+      "https://images.unsplash.com/photo-1609371497456-3a55a205d5eb?auto=format&fit=crop&w=300&q=85",
+  },
+];
+
+const directoryInstitutions = [
+  ["MSEC", "Meenakshi Sundararajan Engineering College (MSEC)"],
+  ["MSSM", "Meenakshi Sundararajan School of Management (MSSM)"],
+  ["MCW", "Meenakshi College for Women (MCW)"],
+] as const;
+const graduationYears = Array.from(
+  { length: new Date().getFullYear() - 2000 + 1 },
+  (_, index) => String(2000 + index),
+);
+
+const conversations = [
+  {
+    ...people[0],
+    preview: "I can introduce you to our hiring team.",
+    time: "10:32",
+    unread: 2,
+    online: true,
+  },
+  {
+    ...people[1],
+    preview: "Shared an event: Chennai Alumni Circle",
+    time: "09:15",
+    unread: 0,
+    online: true,
+  },
+  {
+    ...people[2],
+    preview: "You: That works. See you there!",
+    time: "Yesterday",
+    unread: 0,
+    online: false,
+  },
+  { ...people[3], preview: "Could you review my portfolio?", time: "Mon", unread: 0, online: true },
+];
+
   typeof window !== "undefined" &&
   Boolean(window.matchMedia?.("(prefers-color-scheme: dark)").matches);
 
@@ -1079,6 +1185,26 @@ function DirectoryScreen({
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
+  const filterPanel = useRef<HTMLElement>(null);
+  const closeFilter = useAnimatedDismiss(filterPanel, () => setFilterOpen(false));
+  const [filter, setFilter] = useState("All");
+  const [graduationYear, setGraduationYear] = useState("");
+  const [institution, setInstitution] = useState("");
+  const [location, setLocation] = useState<LocationSelection | null>(null);
+  const filtered = useMemo(
+    () =>
+      people.filter(
+        (p) =>
+          `${p.name} ${p.company} ${p.city} ${p.dept}`
+            .toLowerCase()
+            .includes(query.toLowerCase()) &&
+          (filter === "All" || p.city === filter || p.dept.includes(filter)) &&
+          (!graduationYear || p.year === graduationYear) &&
+          matchesLocation(p.city, location) &&
+          // Do not infer an institution from a member's department.
+          (!institution || ("institution" in p && p.institution === institution)),
+      ),
+    [query, filter, graduationYear, institution, location],
   const [quickChip, setQuickChip] = useState("All");
   const [selectedDeptId, setSelectedDeptId] = useState("");
   const [selectedCity, setSelectedCity] = useState("");
@@ -1284,6 +1410,17 @@ function DirectoryScreen({
               <Icon name="search" />
             </div>
             <h3>No alumni found</h3>
+            <p>Try a different search, graduation year or institution.</p>
+            <button
+              onClick={() => {
+                setQuery("");
+                setFilter("All");
+                setGraduationYear("");
+                setInstitution("");
+                setLocation(null);
+              }}
+            >
+              Clear search and filters
             <p>Try a different name, company, department, or city.</p>
             <button
               onClick={() => {
@@ -1302,8 +1439,9 @@ function DirectoryScreen({
       </div>
 
       {filterOpen && (
-        <div className="sheet-backdrop" onClick={() => setFilterOpen(false)}>
+        <div className="sheet-backdrop" onClick={closeFilter}>
           <section
+            ref={filterPanel}
             className="bottom-sheet"
             role="dialog"
             aria-modal="true"
@@ -1316,6 +1454,7 @@ function DirectoryScreen({
                 <p className="eyebrow">REFINE RESULTS</p>
                 <h2>Directory filters</h2>
               </div>
+              <button onClick={closeFilter} aria-label="Close filters">
               <button
                 onClick={() => setFilterOpen(false)}
                 aria-label="Close filters"
@@ -1326,6 +1465,26 @@ function DirectoryScreen({
             <label>
               Graduation year
               <select
+                value={graduationYear}
+                onChange={(event) => setGraduationYear(event.target.value)}
+              >
+                <option value="">All graduation years</option>
+                {graduationYears.map((year) => (
+                  <option key={year} value={year}>
+                    {year}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Institutions
+              <select value={institution} onChange={(event) => setInstitution(event.target.value)}>
+                <option value="">All institutions</option>
+                {directoryInstitutions.map(([code, name]) => (
+                  <option key={code} value={code}>
+                    {name}
+                  </option>
+                ))}
                 value={selectedYear}
                 onChange={(e) => setSelectedYear(e.target.value)}
               >
@@ -1353,6 +1512,7 @@ function DirectoryScreen({
                 ))}
               </select>
             </label>
+            <LocationFilter value={location} onChange={setLocation} />
             <label>
               City
               <select
@@ -1378,6 +1538,7 @@ function DirectoryScreen({
                 onChange={(e) => setVerifiedOnly(e.target.checked)}
               />
             </label>
+            <button className="primary-button" onClick={closeFilter}>
             <button
               className="primary-button"
               onClick={() => setFilterOpen(false)}
@@ -2207,6 +2368,20 @@ function PersonProfile({
   );
 }
 
+function EventsScreen({
+  onBack, destination,
+}: {
+  onBack: () => void;
+  destination?: { type: "event" | "opportunity"; id: string } | null;
+}) {
+  const [tab, setTab] = useState(destination?.type === "opportunity" ? "Opportunities" : "Events");
+  const [applied, setApplied] = useState(false);
+  useEffect(() => {
+    if (!destination) return;
+    const item = document.getElementById(`network-${destination.id}`);
+    item?.scrollIntoView({ block: "center" });
+    item?.focus({ preventScroll: true });
+  }, [destination]);
 function EventsScreen({ onBack }: { onBack: () => void }) {
   const [tab, setTab] = useState<"Events" | "Opportunities">("Events");
   const [events, setEvents] = useState<AlumniEvent[]>([]);
@@ -2317,6 +2492,95 @@ function EventsScreen({ onBack }: { onBack: () => void }) {
               : "Your next move starts here."}
           </h1>
         </div>
+        {tab === "Events" ? (
+          <div className="event-list">
+            <article className="large-event" id="network-leaders-table" tabIndex={-1}>
+              <div className="event-visual">
+                <span>
+                  28
+                  <br />
+                  <small>MAR</small>
+                </span>
+                <b>FEATURED</b>
+              </div>
+              <div>
+                <p className="eyebrow">LEADERS’ TABLE</p>
+                <h2>Building for scale: Chennai’s product story</h2>
+                <p>
+                  Join senior alumni for an intimate evening of ideas, introductions and dinner.
+                </p>
+                <span>
+                  <Icon name="pin" size={14} />
+                  The Leela Palace · 6:30 PM
+                </span>
+                <button>
+                  Reserve your seat <Icon name="arrow" size={15} />
+                </button>
+              </div>
+            </article>
+            <article className="simple-event" id="network-career-storytelling" tabIndex={-1}>
+              <div className="date-block">
+                <strong>05</strong>
+                <span>APR</span>
+              </div>
+              <div>
+                <p className="eyebrow">VIRTUAL WORKSHOP</p>
+                <h3>Career storytelling for leaders</h3>
+                <span>Online · 11:00 AM</span>
+              </div>
+              <button>
+                <Icon name="chevron" />
+              </button>
+            </article>
+          </div>
+        ) : (
+          <div className="opportunity-list">
+            <article id="network-zoho-senior-engineer" tabIndex={-1}>
+              <div className="opportunity-head">
+                <span className="company-tile">Z</span>
+                <div>
+                  <small>ZOHO</small>
+                  <h3>Senior Product Engineer</h3>
+                  <p>Chennai · Hybrid</p>
+                </div>
+                <VerifyBadge label="Referral" />
+              </div>
+              <p>Design and build reliable systems used by growing businesses worldwide.</p>
+              <div className="skill-list">
+                <span>React</span>
+                <span>TypeScript</span>
+                <span>5+ years</span>
+              </div>
+              <button
+                onClick={() => setApplied(!applied)}
+                className={applied ? "success-button" : ""}
+              >
+                {applied ? (
+                  <>
+                    <Icon name="check" />
+                    Application noted
+                  </>
+                ) : (
+                  <>
+                    Apply with referral <Icon name="arrow" />
+                  </>
+                )}
+              </button>
+            </article>
+            <article id="network-freshworks-design-lead" tabIndex={-1}>
+              <div className="opportunity-head">
+                <span className="company-tile blue">F</span>
+                <div>
+                  <small>FRESHWORKS</small>
+                  <h3>Product Design Lead</h3>
+                  <p>Chennai · Flexible</p>
+                </div>
+              </div>
+              <p>Lead design for a new generation of AI-assisted customer tools.</p>
+              <button>
+                View opportunity <Icon name="arrow" />
+              </button>
+            </article>
 
         {loading ? (
           <p>Loading {tab.toLowerCase()}…</p>
@@ -2655,6 +2919,26 @@ function EditProfile({
   );
 }
 
+const reportablePeople: ReportablePerson[] = people.map(({ id, name, dept, year }) => ({
+  id,
+  name,
+  dept,
+  year,
+}));
+
+const disconnectedServices: AppServices = {};
+
+export default function App({ services = disconnectedServices }: { services?: AppServices }) {
+  const [messaging] = useState(() => createMessagingStore(conversations));
+  useEffect(() => () => messaging.dispose(), [messaging]);
+  const [account, setAccount] = useState(signedInAccount);
+  const currentAlumniId: AlumniId = account.id;
+  const [signedIn, setSignedIn] = useState(false);
+  const [authEntryView, setAuthEntryView] = useState<"register" | "login">("register");
+  // Loaded before sign-in so this device's appearance applies to the sign-in screen too.
+  const [settings, setSettings] = useState<UserSettings>(() => {
+    return loadSettings(account);
+  });
 export default function App() {
   const {
     user,
@@ -2681,6 +2965,14 @@ export default function App() {
   } | null>(null);
   const [unreadCount, setUnreadCount] = useState(0);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [resetLink, setResetLink] = useState(() => parseResetLink(window.location.hash));
+  const [accessPage, setAccessPage] = useState<"login" | "forgot" | "support">(
+    () => parseResetLink(window.location.hash).requested ? "forgot" : "login",
+  );
+  const [notificationUnread, setNotificationUnread] = useState(0);
+  const [feedTarget, setFeedTarget] = useState<string | null>(null);
+  const [feedCreationOpen, setFeedCreationOpen] = useState(false);
+  const [eventTarget, setEventTarget] = useState<{ type: "event" | "opportunity"; id: string } | null>(null);
   const [preferAdminTab, setPreferAdminTab] = useState(false);
   const [locationBusy, setLocationBusy] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
@@ -2776,6 +3068,38 @@ export default function App() {
     role: settings.account.role,
     image: settings.account.avatar || undefined,
   };
+  useEffect(() => {
+    const onHashChange = () => {
+      const link = parseResetLink(window.location.hash);
+      setResetLink(link);
+      if (link.requested) setAccessPage("forgot");
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+  useEffect(() => {
+    if (!signedIn || !services.notifications) return;
+    const controller = new AbortController();
+    void services.notifications.list(controller.signal).then(
+      (items) => {
+        if (controller.signal.aborted) return;
+        try {
+          setNotificationUnread(validateNotifications(items).filter((item) => !item.read).length);
+        } catch {
+          setNotificationUnread(0);
+        }
+      },
+      () => { if (!controller.signal.aborted) setNotificationUnread(0); },
+    );
+    return () => controller.abort();
+  }, [signedIn, services.notifications]);
+  const returnToLogin = () => {
+    setAuthEntryView("login");
+    setAccessPage("login");
+    setResetLink({ requested: false, token: null });
+    if (parseResetLink(window.location.hash).requested)
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+  };
 
   useEffect(() => {
     const query = window.matchMedia?.("(prefers-color-scheme: dark)");
@@ -2857,6 +3181,30 @@ export default function App() {
     setSettingsStack([route]);
     setOverlay("settings");
   };
+  const openNotificationTarget = (target: NotificationTarget): string | null => {
+    if (target.type === "profile") {
+      if (target.id === account.id) setOverlay("preview");
+      else if (people.some((person) => person.id === target.id)) openPerson(target.id);
+      else return "This profile is no longer available.";
+    } else if (target.type === "message") {
+      if (!conversations.some((conversation) => conversation.id === target.id))
+        return "This conversation is no longer available.";
+      openChat(target.id);
+    } else if (target.type === "feed") {
+      if (!feedPostExists(target.id)) return "This post is no longer available.";
+      setFeedTarget(target.id);
+      setScreen("feed");
+      setOverlay("none");
+    } else {
+      const ids = target.type === "event"
+        ? ["leaders-table", "career-storytelling"]
+        : ["zoho-senior-engineer", "freshworks-design-lead"];
+      if (!ids.includes(target.id)) return "This item is no longer available.";
+      setEventTarget({ type: target.type, id: target.id });
+      setOverlay("events");
+    }
+    return null;
+  };
   const settingsBack = () => {
     if (settingsStack.length <= 1) {
       setSettingsStack([]);
@@ -2870,6 +3218,21 @@ export default function App() {
     setOverlay("settings");
   };
 
+  const openWebsitePreview = () => {
+    if (services.membershipAuth) return;
+    setAccount(signedInAccount);
+    setSettings(loadSettings(signedInAccount));
+    setAuthNotice(null);
+    setPublicViewDismissed(false);
+    setScreen("home");
+    setOverlay("none");
+    setSignedIn(true);
+    returnToLogin();
+  };
+  const signIn = (result: Extract<MembershipSession, { status: "verified" }>) => {
+    const session = requireVerified(result);
+    setAccount(session.account);
+    setSettings(withCurrentSession(loadSettings(session.account), true));
   const handleSignedIn = (preferAdmin: boolean) => {
     setSettings((current) => withCurrentSession(current, true));
     setAuthNotice(null);
@@ -2877,6 +3240,11 @@ export default function App() {
     setPreferAdminTab(preferAdmin);
     setScreen("home");
     setOverlay("none");
+    setSignedIn(true);
+    returnToLogin();
+  };
+  const logout = async (notice?: string) => {
+    if (services.membershipAuth) await services.membershipAuth.signOut(new AbortController().signal);
   };
 
   const logout = async (notice?: string) => {
@@ -2900,6 +3268,8 @@ export default function App() {
     setOverlay("none");
     setSettingsStack([]);
     setAuthNotice(notice ?? null);
+    returnToLogin();
+    setNotificationUnread(0);
   };
 
   const deleteAccount = () => {
@@ -2953,6 +3323,7 @@ export default function App() {
     );
   }
 
+  if (!signedIn || resetLink.requested) {
   if (!isAuthenticated) {
     const showPublicProfile =
       sharedTarget === "self" &&
@@ -2969,7 +3340,16 @@ export default function App() {
     return (
       <div className="app-stage">
         <div className="phone-shell">
-          {showPublicProfile ? (
+          {accessPage === "forgot" ? (
+            <ForgotPassword key={resetLink.requested ? resetLink.token ?? "invalid-reset" : "request-reset"}
+              service={services.auth} resetRequested={resetLink.requested}
+              token={resetLink.token} onLogin={() => {
+                if (signedIn) logout();
+                else returnToLogin();
+              }} />
+          ) : accessPage === "support" ? (
+            <SupportPage service={services.support} onBack={returnToLogin} onReturn={returnToLogin} />
+          ) : showPublicProfile ? (
             <ProfilePreview
               account={settings.account}
               privacy={privacy}
@@ -2983,6 +3363,10 @@ export default function App() {
               onSignIn={() => setPublicViewDismissed(true)}
             />
           ) : (
+            <AuthFlow service={services.membershipAuth} initialView={authEntryView} onVerified={signIn} notice={linkNotice ?? authNotice}
+              onPreview={services.membershipAuth ? undefined : openWebsitePreview}
+              onForgotPassword={() => setAccessPage("forgot")}
+              onSupport={() => setAccessPage("support")} />
             <Auth
               onSignedIn={handleSignedIn}
               notice={linkNotice ?? authNotice}
@@ -3003,7 +3387,13 @@ export default function App() {
   }
 
   let content: ReactNode;
-  if (overlay === "settings" && settingsStack.length)
+  if (overlay === "notifications")
+    content = (
+      <NotificationsPage service={services.notifications}
+        onBack={() => setOverlay("none")} onNavigate={openNotificationTarget}
+        onUnreadChange={setNotificationUnread} />
+    );
+  else if (overlay === "settings" && settingsStack.length)
     content = (
       <Suspense
         fallback={
@@ -3029,6 +3419,9 @@ export default function App() {
           deleteAccount={deleteAccount}
           previewProfile={() => setOverlay("preview")}
           profileUrl={profileUrl}
+          reportablePeople={reportablePeople}
+          supportService={services.support}
+          returnToApp={() => { setOverlay("none"); setSettingsStack([]); }}
           reportablePeople={[]}
         />
       </Suspense>
@@ -3070,6 +3463,9 @@ export default function App() {
       />
     );
   else if (overlay === "events")
+    content = <EventsScreen destination={eventTarget} onBack={() => {
+      setEventTarget(null); setOverlay("none");
+    }} />;
     content = <EventsScreen onBack={() => setOverlay("none")} />;
   else if (overlay === "edit")
     content = (
@@ -3114,6 +3510,7 @@ export default function App() {
       />
     );
   else if (screen === "feed")
+    content = <CommunityFeed profile={mainProfile} onProfile={() => setScreen("profile")} focusPostId={feedTarget} onCreationChange={setFeedCreationOpen} />;
     content = (
       <CommunityFeed
         profile={mainProfile}
@@ -3157,9 +3554,13 @@ export default function App() {
     );
 
   return (
+    <NotificationNavigation.Provider value={{
+      open: () => setOverlay("notifications"), unread: notificationUnread,
+    }}>
     <div className="app-stage app-stage--signed">
       <div className="phone-shell">
         {content}
+        {overlay === "none" && !(screen === "feed" && feedCreationOpen) && <BottomNav screen={screen} setScreen={setScreen} t={t} />}
         {overlay === "none" && (
           <BottomNav
             screen={screen}
@@ -3185,5 +3586,6 @@ export default function App() {
         </div>
       </div>
     </div>
+    </NotificationNavigation.Provider>
   );
 }

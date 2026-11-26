@@ -23,6 +23,15 @@ import { listAlumniDirectory, type Profile } from "../backend/profile";
 import { supabase } from "../backend/supabase";
 import { ChatIcon, type ChatIconName } from "./ChatIcon";
 import { EmojiPicker } from "./EmojiPicker";
+import { useAnimatedDismiss } from "../ui/motion";
+import {
+  currentUser,
+  messagePreview,
+  type Attachment,
+  type Contact,
+  type Message,
+  type MessagingStore,
+} from "./model";
 import "./messaging.css";
 
 function initialsOf(name: string): string {
@@ -127,8 +136,47 @@ function Dialog({
   children: ReactNode;
   className?: string;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const dismiss = useAnimatedDismiss(ref, onClose);
+  const closeRef = useRef(dismiss);
+  closeRef.current = dismiss;
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const selector = 'button:not(:disabled), input, select, textarea, a[href], [tabindex="0"]';
+    (
+      ref.current?.querySelector<HTMLElement>("input, textarea") ||
+      ref.current?.querySelector<HTMLElement>("button")
+    )?.focus();
+    function keydown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeRef.current();
+      }
+      if (e.key !== "Tab") return;
+      const elements = [...(ref.current?.querySelectorAll<HTMLElement>(selector) || [])].filter(
+        (el) => el.getClientRects().length,
+      );
+      if (!elements.length) {
+        e.preventDefault();
+        return;
+      }
+      if (e.shiftKey && document.activeElement === elements[0]) {
+        e.preventDefault();
+        elements[elements.length - 1]?.focus();
+      } else if (!e.shiftKey && document.activeElement === elements[elements.length - 1]) {
+        e.preventDefault();
+        elements[0].focus();
+      }
+    }
+    document.addEventListener("keydown", keydown, true);
+    return () => {
+      document.removeEventListener("keydown", keydown, true);
+      previous?.isConnected && previous.focus({ preventScroll: true });
+    };
+  }, []);
   return (
-    <div className="msg-overlay" onClick={onClose}>
+    <div className="msg-overlay" onClick={dismiss}>
       <div
         className={`msg-dialog msg-frost ${className}`}
         role="dialog"
@@ -141,7 +189,7 @@ function Dialog({
             <span className="msg-overline">MSGI ONE · MESSAGING</span>
             <h2>{title}</h2>
           </div>
-          <IconButton icon="close" label={`Close ${title}`} onClick={onClose} />
+          <IconButton icon="close" label={`Close ${title}`} onClick={dismiss} />
         </div>
         {children}
       </div>
