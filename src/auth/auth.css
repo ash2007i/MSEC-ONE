@@ -1,0 +1,69 @@
+.network-recovery .auth-intro > .network-tagline--compact {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.membership-auth #membership-name::placeholder {
+  opacity: 0.65;
+}
+.membership-welcome {
+  margin: 0 0 20px;
+  color: var(--white);
+  font-family: "Playfair Display", "Noto Sans Tamil", serif;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: center;
+}
+.membership-brand-name {
+  color: var(--gold);
+}
+.membership-welcome .membership-brand-name,
+[data-theme="dark"] .membership-brand-name {
+  color: var(--premium-gold);
+}
+.membership-google-logo {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.membership-auth .google-auth-button {
+  display: flex;
+  width: 100%;
+}
+
+.membership-auth .auth-switch .membership-text-link,
+.membership-auth .forgot.membership-text-link,
+.membership-support .membership-text-link.set-button {
+  display: inline;
+  width: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--gold);
+  font: inherit;
+  font-weight: 600;
+  vertical-align: baseline;
+}
+
+[data-theme="dark"] .membership-auth .auth-switch .membership-text-link,
+[data-theme="dark"] .membership-auth .forgot.membership-text-link,
+[data-theme="dark"] .membership-support .membership-text-link {
+  color: var(--premium-gold);
+}
+
+.membership-auth .forgot.membership-text-link {
+  display: block;
+}
+
+.membership-text-link:hover:not(:disabled) {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+:root:not([data-theme="dark"]) .membership-auth .membership-login-light-ink {
+  color: var(--text);
+}

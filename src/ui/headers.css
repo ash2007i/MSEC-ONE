@@ -1,0 +1,97 @@
+:root:not([data-theme="dark"]) .curved-header {
+  --light-header-base: linear-gradient(130deg, var(--deep), var(--navy) 45%, var(--navy-2));
+}
+
+:root:not([data-theme="dark"]) .profile-hero::before {
+  --light-header-base: linear-gradient(130deg, var(--deep), var(--navy), var(--navy-2));
+}
+
+:root:not([data-theme="dark"]) .msg-chat-header {
+  --light-header-base: linear-gradient(
+    125deg,
+    rgb(255 255 255 / 84%),
+    rgb(250 248 242 / 90%),
+    rgb(233 217 184 / 48%)
+  );
+}
+
+/* Fine, static translucent grain preserves the theme's existing gradient beneath it. */
+:root:not([data-theme="dark"]) .curved-header,
+:root:not([data-theme="dark"]) .profile-hero::before,
+:root:not([data-theme="dark"]) .msg-chat-header {
+  background-image: var(--surface-grain), var(--light-header-base);
+  background-size:
+    128px 128px,
+    100% 100%;
+  background-repeat: repeat, no-repeat;
+}
+
+[data-theme="dark"] {
+  --section-header-fill: linear-gradient(
+    135deg,
+    rgb(63, 53, 37),
+    rgb(100, 84, 57) 52%,
+    rgb(73, 60, 41)
+  );
+}
+
+[data-theme="dark"] .curved-header,
+[data-theme="dark"] .profile-hero::before,
+[data-theme="dark"] .msg-chat-header {
+  background-image: var(--surface-grain), var(--section-header-fill);
+  background-size:
+    128px 128px,
+    100% 100%;
+  background-repeat: repeat, no-repeat;
+}
+
+/* Chat headers previously used a pale surface; keep their text readable on gold. */
+[data-theme="dark"] .msg-chat-header {
+  --ink: var(--white);
+  --text: var(--white);
+  --muted: var(--white);
+  color: var(--white);
+}
+
+:root:not([data-theme="dark"]) .network-recovery--grain {
+  background-image:
+    var(--surface-grain),
+    radial-gradient(ellipse at 100% 80%, rgb(216 188 131 / 36%), transparent 55%),
+    linear-gradient(150deg, var(--deep), var(--navy-2) 60%, var(--navy));
+  background-size:
+    128px 128px,
+    100% 100%,
+    100% 100%;
+  background-repeat: repeat, no-repeat, no-repeat;
+}
+
+[data-theme="dark"] .network-recovery--grain {
+  background-image:
+    var(--surface-grain),
+    radial-gradient(ellipse at 100% 82%, rgb(216 188 131 / 14%), transparent 55%),
+    linear-gradient(150deg, var(--dark-bg), var(--dark-secondary) 60%, #101f38);
+  background-size:
+    128px 128px,
+    100% 100%,
+    100% 100%;
+  background-repeat: repeat, no-repeat, no-repeat;
+}
+
+[data-theme="dark"] .msg-chat-header .msg-icon-button,
+[data-theme="dark"] .msg-chat-header > .msg-icon-button {
+  color: var(--white);
+}
+
+/* Match header icon surfaces without changing logos, profile photos or content icons. */
+[data-theme="dark"]
+  :is(.curved-header, .profile-hero > .brand-bar, .msg-chat-header)
+  :is(.icon-button, .notification, .msg-icon-button),
+[data-theme="dark"] .curved-header .hero-stats button > span,
+[data-theme="dark"] .home-hero .hero-stats button:nth-child(n) > span {
+  background-image: var(--section-header-fill);
+  border-color: var(--premium-gold);
+  color: var(--white);
+}
+:root {
+  --surface-grain: url("../assets/surface-grain.png");
+}

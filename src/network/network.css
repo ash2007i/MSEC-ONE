@@ -1,0 +1,170 @@
+/*
+ * New screens only. Reuse the existing MSGI controls, typefaces, radii and theme
+ * tokens; existing light/dark artwork and gradients are not redefined.
+ */
+.network-heading h1 {
+  font-size: 26px;
+  line-height: 1.25;
+}
+.network-heading h1:focus,
+.network-screen .topbar h1:focus {
+  outline: none;
+}
+.network-form > .set-message,
+.network-screen .content > .set-message {
+  margin-bottom: 20px;
+}
+.network-icon-action.set-button {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 10px;
+}
+.network-recovery .network-form > .set-button--ghost {
+  margin-top: 8px;
+}
+.network-password-rules {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 24px;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.network-password-rules li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.network-password-rules .is-met {
+  color: var(--ink);
+}
+.network-password-rules .is-met svg {
+  color: var(--link);
+}
+.network-support .set-field > textarea {
+  min-height: 220px;
+  resize: vertical;
+}
+.network-support .set-upload {
+  justify-content: flex-start;
+  text-align: left;
+}
+.network-support .set-attachment {
+  background: var(--glass-icon);
+}
+.network-screen .set-chips {
+  padding-bottom: 4px;
+}
+.network-notification-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.network-notification-list {
+  display: grid;
+  gap: 12px;
+}
+.network-notification {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 32px;
+  align-items: start;
+  gap: 10px;
+  padding: 16px 12px;
+  border-inline-start: 3px solid var(--glass-stroke);
+}
+.network-notification.is-unread {
+  border-inline-start-color: var(--gold);
+}
+.network-notification .network-icon-action {
+  min-width: 32px;
+  padding: 6px;
+  margin-top: -10px;
+}
+.network-notification__body {
+  min-width: 0;
+}
+.network-notification__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.network-read-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.network-read-status i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--gold);
+}
+.network-notification__body > p {
+  margin-bottom: 8px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.network-notification__body strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+.network-notification__body > .network-notification__subject,
+.network-notification time {
+  color: var(--muted);
+  font-size: 11px;
+}
+.network-notification__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 8px;
+}
+.network-notification__actions .set-button {
+  padding-inline: 0;
+  text-align: left;
+  font-size: 11px;
+}
+.network-notification-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 180px;
+  color: var(--muted);
+  font-size: 13px;
+}
+[data-theme="dark"] .network-form .set-button--primary {
+  background: var(--gradient-6);
+}
+[data-theme="dark"] .network-screen .set-chips button.active {
+  color: var(--dark-on-light);
+  background: var(--gradient-3);
+}
+[data-theme="dark"] .network-notification__avatar .frosted-icon {
+  color: var(--dark-on-light);
+  background: var(--gradient-5);
+}
+[data-theme="dark"] .network-support .set-upload {
+  color: var(--dark-text);
+  background: var(--dark-elevated);
+  border-color: var(--dark-border);
+}
+[data-theme="dark"] .network-form .set-message--error,
+[data-theme="dark"] .network-screen .set-message--error {
+  color: var(--danger-strong);
+  border-color: var(--danger);
+}

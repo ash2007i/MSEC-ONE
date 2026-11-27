@@ -1,0 +1,72 @@
+.directory-location {
+  margin-bottom: 24px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+.directory-location__label {
+  display: block;
+}
+.directory-location__trigger {
+  width: 100%;
+  margin-top: 8px;
+  color: var(--ink);
+  text-align: left;
+}
+.directory-location__trigger span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.directory-location__trigger > svg:last-child {
+  rotate: 90deg;
+}
+.directory-location__panel {
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+}
+.directory-location__status,
+.directory-location__attribution {
+  display: block;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.directory-location__status .text-link {
+  margin-left: 8px;
+}
+.directory-location__options {
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-top: 8px;
+}
+.directory-location__option {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px;
+  border-radius: 8px;
+  color: var(--ink);
+  text-align: left;
+}
+.directory-location__option.is-active {
+  background: var(--light-blue);
+}
+.directory-location__option small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.directory-location__attribution a {
+  color: var(--link);
+  text-decoration: underline;
+}

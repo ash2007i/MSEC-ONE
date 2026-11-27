@@ -1,0 +1,11 @@
+{
+  "title": "MSEC_ONE",
+  "description": "A web application designed to help users access and manage the content provided.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
